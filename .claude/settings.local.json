@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(openspec list *)",
+      "Bash(openspec status *)",
+      "Bash(rtk grep *)",
+      "Bash(rtk ls *)",
+      "Bash(rtk read *)",
+      "Bash(rtk git *)",
+      "Bash(npm install *)",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); hooks=d.get\\('hooks',{}\\); [print\\(k,v\\) for k,v in hooks.items\\(\\)]\")",
+      "Bash(volta install *)"
+    ]
+  }
+}
