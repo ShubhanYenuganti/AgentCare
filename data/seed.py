@@ -34,6 +34,10 @@ PATIENTS = [
         "name": "Margaret Chen",
         "age": 74,
         "address": "123 Sunset Blvd, San Francisco, CA 94122",
+        "pharmacy_name": "CVS Mission St",
+        "pharmacy_email": "pharmacy@cvs-mission.example",
+        "doctor_name": "Dr. Anita Patel",
+        "doctor_email": "dr.anita.patel@exampleclinic.org",
         "preferences": {"appointment_times": ["morning"], "transport_preference": "family_first"},
         "medications": [{"name": "Lisinopril", "refill_due": "2026-04-17"}],
     },
@@ -42,6 +46,10 @@ PATIENTS = [
         "name": "Robert Harris",
         "age": 81,
         "address": "88 Ocean Ave, San Francisco, CA 94112",
+        "pharmacy_name": "CVS Mission St",
+        "pharmacy_email": "pharmacy@cvs-mission.example",
+        "doctor_name": "Dr. Ravi Singh",
+        "doctor_email": "dr.ravi.singh@exampleclinic.org",
         "preferences": {"appointment_times": ["morning"], "transport_preference": "caregiver"},
         "medications": [{"name": "Warfarin"}, {"name": "Aspirin"}],
     },
@@ -50,6 +58,10 @@ PATIENTS = [
         "name": "Dorothy Kim",
         "age": 68,
         "address": "45 Noriega St, San Francisco, CA 94122",
+        "pharmacy_name": "CVS Mission St",
+        "pharmacy_email": "pharmacy@cvs-mission.example",
+        "doctor_name": "NP Monica Tran",
+        "doctor_email": "np.monica.tran@exampleclinic.org",
         "preferences": {"appointment_times": ["afternoon"], "transport_preference": "family_first"},
         "medications": [{"name": "Metformin", "last_dose": "2026-04-19"}],
     },
@@ -127,14 +139,22 @@ def _seed_patients(conn: sqlite3.Connection) -> None:
     for patient in PATIENTS:
         conn.execute(
             """
-            INSERT INTO patients (patient_id, name, age, address, preferences_json, life_graph_json, active)
-            VALUES (?, ?, ?, ?, ?, ?, 1)
+            INSERT INTO patients (
+                patient_id, name, age, address,
+                pharmacy_name, pharmacy_email, doctor_name, doctor_email,
+                preferences_json, life_graph_json, active
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
             """,
             (
                 patient["patient_id"],
                 patient["name"],
                 patient["age"],
                 patient["address"],
+                patient["pharmacy_name"],
+                patient["pharmacy_email"],
+                patient["doctor_name"],
+                patient["doctor_email"],
                 json.dumps(patient["preferences"]),
                 json.dumps(patient),
             ),

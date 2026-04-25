@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -99,6 +100,69 @@ def get_all_patients() -> list[dict[str, Any]]:
     return results
 
 
+def _normalize_person_name(name: str) -> str:
+    return " ".join((name or "").strip().split()).lower()
+
+
+def _name_tokens(text: str) -> list[str]:
+    return re.findall(r"[a-z]+", _normalize_person_name(text))
+
+
+def _name_token_matches(name_token: str, query_token: str) -> bool:
+    if not query_token:
+        return False
+    if name_token == query_token:
+        return True
+    return len(query_token) >= 3 and name_token.startswith(query_token)
+
+
+def find_active_patients_by_name(name: str) -> list[dict[str, Any]]:
+    """Return active patients whose name exactly matches (case/space-insensitive)."""
+    target = _normalize_person_name(name)
+    if not target:
+        return []
+    matches: list[dict[str, Any]] = []
+    for patient in get_all_patients():
+        if _normalize_person_name(str(patient.get("name", ""))) == target:
+            matches.append(patient)
+    return matches
+
+
+def find_active_patients_by_name_query(query: str) -> list[dict[str, Any]]:
+    """
+    Return active patients whose names are referenced in free text.
+
+    Matching rules:
+    - exact full-name phrase match, or
+    - partial token match (query token is a prefix of a patient name token)
+    """
+    normalized_query = _normalize_person_name(query)
+    if not normalized_query:
+        return []
+
+    query_tokens = _name_tokens(normalized_query)
+    if not query_tokens:
+        return []
+
+    matches: list[dict[str, Any]] = []
+    for patient in get_all_patients():
+        name = _normalize_person_name(str(patient.get("name", "")))
+        if not name:
+            continue
+
+        full_name_match = re.search(rf"(?<!\w){re.escape(name)}(?!\w)", normalized_query) is not None
+        name_tokens = _name_tokens(name)
+        partial_match = any(
+            _name_token_matches(name_token, query_token)
+            for name_token in name_tokens
+            for query_token in query_tokens
+        )
+
+        if full_name_match or partial_match:
+            matches.append(patient)
+    return matches
+
+
 def get_patient(patient_id: str) -> dict[str, Any]:
     with get_connection() as conn:
         row = conn.execute(
@@ -120,12 +184,20 @@ def write_patient(data: dict[str, Any]) -> str:
     with get_connection() as conn:
         conn.execute(
             """
-            INSERT INTO patients (patient_id, name, age, address, preferences_json, life_graph_json, active)
-            VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, 1))
+            INSERT INTO patients (
+                patient_id, name, age, address,
+                pharmacy_name, pharmacy_email, doctor_name, doctor_email,
+                preferences_json, life_graph_json, active
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 1))
             ON CONFLICT(patient_id) DO UPDATE SET
                 name=excluded.name,
                 age=excluded.age,
                 address=excluded.address,
+                pharmacy_name=excluded.pharmacy_name,
+                pharmacy_email=excluded.pharmacy_email,
+                doctor_name=excluded.doctor_name,
+                doctor_email=excluded.doctor_email,
                 preferences_json=excluded.preferences_json,
                 life_graph_json=excluded.life_graph_json,
                 active=excluded.active
@@ -135,6 +207,10 @@ def write_patient(data: dict[str, Any]) -> str:
                 name,
                 age,
                 address,
+                data.get("pharmacy_name"),
+                data.get("pharmacy_email"),
+                data.get("doctor_name"),
+                data.get("doctor_email"),
                 json.dumps(preferences),
                 json.dumps(data),
                 data.get("active", 1),
@@ -153,6 +229,10 @@ def serialize_life_graph(patient_id: str) -> dict[str, Any]:
     snapshot["name"] = snapshot.get("name", patient.get("name"))
     snapshot["age"] = snapshot.get("age", patient.get("age"))
     snapshot["address"] = snapshot.get("address", patient.get("address"))
+    snapshot["pharmacy_name"] = snapshot.get("pharmacy_name", patient.get("pharmacy_name"))
+    snapshot["pharmacy_email"] = snapshot.get("pharmacy_email", patient.get("pharmacy_email"))
+    snapshot["doctor_name"] = snapshot.get("doctor_name", patient.get("doctor_name"))
+    snapshot["doctor_email"] = snapshot.get("doctor_email", patient.get("doctor_email"))
     snapshot["preferences"] = snapshot.get("preferences", patient.get("preferences_json", {}))
     with get_connection() as conn:
         caregivers = conn.execute(
@@ -161,6 +241,159 @@ def serialize_life_graph(patient_id: str) -> dict[str, Any]:
         ).fetchall()
     snapshot["assigned_caregivers"] = [row["caregiver_id"] for row in caregivers]
     return snapshot
+
+
+def serialize_complete_life_graph(patient_id: str) -> dict[str, Any]:
+    """
+    Build the complete life graph for a patient, including all linked entities.
+
+    Linked entities include caregivers/schedules, updates, actions, action chat,
+    notifications, and expiration notifications related to this patient.
+    """
+    with get_connection() as conn:
+        patient_row = conn.execute(
+            "SELECT * FROM patients WHERE patient_id=? LIMIT 1",
+            (patient_id,),
+        ).fetchone()
+        if not patient_row:
+            return {}
+
+        patient = dict(patient_row)
+        preferences = _json_load(patient.get("preferences_json"), {})
+        life_graph = _json_load(patient.get("life_graph_json"), {})
+
+        caregiver_links_rows = conn.execute(
+            """
+            SELECT patient_id, caregiver_id
+            FROM patient_caregivers
+            WHERE patient_id=?
+            ORDER BY caregiver_id ASC
+            """,
+            (patient_id,),
+        ).fetchall()
+        caregiver_links = _rows_to_dicts(caregiver_links_rows)
+        caregiver_ids = [row["caregiver_id"] for row in caregiver_links_rows]
+
+        caregivers: list[dict[str, Any]] = []
+        caregiver_schedule: list[dict[str, Any]] = []
+        if caregiver_ids:
+            placeholders = ",".join(["?"] * len(caregiver_ids))
+            caregivers = _rows_to_dicts(
+                conn.execute(
+                    f"""
+                    SELECT *
+                    FROM caregivers
+                    WHERE caregiver_id IN ({placeholders})
+                    ORDER BY caregiver_id ASC
+                    """,
+                    caregiver_ids,
+                ).fetchall()
+            )
+            caregiver_schedule = _rows_to_dicts(
+                conn.execute(
+                    f"""
+                    SELECT *
+                    FROM caregiver_schedule
+                    WHERE caregiver_id IN ({placeholders})
+                    ORDER BY date ASC, start_time ASC, id ASC
+                    """,
+                    caregiver_ids,
+                ).fetchall()
+            )
+
+        patient_updates = _rows_to_dicts(
+            conn.execute(
+                """
+                SELECT *
+                FROM patient_updates
+                WHERE patient_id=?
+                ORDER BY created_at DESC, id DESC
+                """,
+                (patient_id,),
+            ).fetchall()
+        )
+        for row in patient_updates:
+            row["fields_changed"] = _json_load(row.get("fields_changed"), [])
+
+        actions = _rows_to_dicts(
+            conn.execute(
+                """
+                SELECT *
+                FROM action_history
+                WHERE patient_id=?
+                ORDER BY created_at DESC, action_id ASC
+                """,
+                (patient_id,),
+            ).fetchall()
+        )
+        for row in actions:
+            row["api_payload"] = _json_load(row.get("api_payload"), None)
+        action_ids = [row["action_id"] for row in actions if row.get("action_id")]
+
+        action_chat: list[dict[str, Any]] = []
+        expiration_notifications: list[dict[str, Any]] = []
+        if action_ids:
+            placeholders = ",".join(["?"] * len(action_ids))
+            action_chat = _rows_to_dicts(
+                conn.execute(
+                    f"""
+                    SELECT *
+                    FROM action_chat
+                    WHERE action_id IN ({placeholders})
+                    ORDER BY id ASC
+                    """,
+                    action_ids,
+                ).fetchall()
+            )
+            expiration_notifications = _rows_to_dicts(
+                conn.execute(
+                    f"""
+                    SELECT *
+                    FROM expiration_notifications
+                    WHERE action_id IN ({placeholders})
+                    ORDER BY created_at DESC, id DESC
+                    """,
+                    action_ids,
+                ).fetchall()
+            )
+
+        notifications = _rows_to_dicts(
+            conn.execute(
+                """
+                SELECT *
+                FROM notifications
+                WHERE patient_id=?
+                ORDER BY created_at DESC, id DESC
+                """,
+                (patient_id,),
+            ).fetchall()
+        )
+
+    return {
+        "patient": {
+            "patient_id": patient.get("patient_id"),
+            "name": patient.get("name"),
+            "age": patient.get("age"),
+            "address": patient.get("address"),
+            "pharmacy_name": patient.get("pharmacy_name"),
+            "pharmacy_email": patient.get("pharmacy_email"),
+            "doctor_name": patient.get("doctor_name"),
+            "doctor_email": patient.get("doctor_email"),
+            "active": patient.get("active", 1),
+            "created_at": patient.get("created_at"),
+            "preferences": preferences,
+            "life_graph": life_graph,
+        },
+        "assigned_caregivers": caregiver_ids,
+        "caregiver_links": caregiver_links,
+        "caregivers": caregivers,
+        "caregiver_schedule": caregiver_schedule,
+        "patient_updates": patient_updates,
+        "actions": actions,
+        "action_chat": action_chat,
+        "notifications": notifications,
+        "expiration_notifications": expiration_notifications,
+    }
 
 
 # Patient update helpers
@@ -259,9 +492,9 @@ def write_action(action: dict[str, Any]) -> str:
                 action_id, patient_id, domain, type, description, draft_content, draft_version,
                 modification_in_progress, urgency_level, review_by, invocation_date, is_overdue,
                 escalation_count, reviewed, completed, manual_action_type, api_payload,
-                recipient_email, recipient_type, scheduling_status, last_modified_at
+                recipient_email, recipient_type, email_subject, scheduling_status, last_modified_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
             ON CONFLICT(action_id) DO UPDATE SET
                 patient_id=excluded.patient_id,
                 domain=excluded.domain,
@@ -281,6 +514,7 @@ def write_action(action: dict[str, Any]) -> str:
                 api_payload=excluded.api_payload,
                 recipient_email=excluded.recipient_email,
                 recipient_type=excluded.recipient_type,
+                email_subject=excluded.email_subject,
                 scheduling_status=excluded.scheduling_status,
                 last_modified_at=datetime('now')
             """,
@@ -304,6 +538,7 @@ def write_action(action: dict[str, Any]) -> str:
                 json.dumps(action.get("api_payload")) if action.get("api_payload") is not None else None,
                 action.get("recipient_email"),
                 action.get("recipient_type"),
+                action.get("email_subject"),
                 action.get("scheduling_status"),
             ),
         )

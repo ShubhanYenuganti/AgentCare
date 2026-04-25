@@ -6,6 +6,7 @@ from pathlib import Path
 
 from uagents import Agent, Context
 
+from agents.shared.api_capabilities import worker_api_capability_block
 from agents.shared.config import SCHEDULING_AGENT_SEED, LocalFirstResolver
 from agents.shared.constants import AGENT_PORTS
 from agents.shared.models import MockDomainTask, MockSupervisorResult
@@ -19,6 +20,13 @@ agent = Agent(
     readme_path=str(Path(__file__).parent / "README.md"),
     resolve=LocalFirstResolver(),
 )
+
+_SCHEDULING_API_GUIDANCE = worker_api_capability_block("scheduling")
+
+
+@agent.on_event("startup")
+async def on_startup(ctx: Context) -> None:
+    ctx.logger.info("[API-GUIDANCE] scheduling capability schema loaded:\n%s", _SCHEDULING_API_GUIDANCE)
 
 
 @agent.on_message(MockDomainTask)

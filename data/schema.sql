@@ -25,6 +25,10 @@ CREATE TABLE IF NOT EXISTS patients (
   name             TEXT NOT NULL,
   age              INTEGER,
   address          TEXT,
+  pharmacy_name    TEXT,
+  pharmacy_email   TEXT,
+  doctor_name      TEXT,
+  doctor_email     TEXT,
   preferences_json TEXT,
   life_graph_json  TEXT,
   active           INTEGER DEFAULT 1,
@@ -94,6 +98,7 @@ CREATE TABLE IF NOT EXISTS action_history (
   api_payload                TEXT,
   recipient_email            TEXT,
   recipient_type             TEXT,
+  email_subject              TEXT,
   scheduling_status          TEXT,
   last_modified_at           TEXT,
   created_at                 TEXT DEFAULT (datetime('now'))
