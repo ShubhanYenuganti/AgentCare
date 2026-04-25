@@ -1,0 +1,1 @@
+"""Appointment domain agent package."""
