@@ -26,11 +26,18 @@ from agents.shared.config import (
     SCHEDULING_AGENT_ADDRESS,
     SUPERVISOR_ADDRESS_BY_DOMAIN,
 )
-from agents.shared.constants import AGENT_PORTS, DOMAIN_KEYWORDS, SUPPORTED_DOMAINS
+from agents.shared.constants import AGENT_PORTS, DOMAIN_KEYWORDS, ORG_CONTEXT_MAP, SUPPORTED_DOMAINS
 from agents.shared.db import (
     find_active_patients_by_name_query,
+    get_org_profile,
+    get_overdue_actions,
     get_patient,
+    has_been_notified,
+    log_expiration_notification,
+    mark_action_overdue,
     serialize_complete_life_graph,
+    update_action,
+    write_notification,
 )
 from agents.shared.llm import call_claude_json
 from agents.shared.models import (
@@ -106,6 +113,7 @@ executor = Agent(
 chat_proto = Protocol(spec=chat_protocol_spec)
 _started_at = datetime.now(tz=timezone.utc)
 _last_chat_ingress_at: datetime | None = None
+_executor_ready: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +133,18 @@ class HttpMessageResponse(Model):
     routed_domain: str
     routed_address: str
     intent: str
+
+
+class InternalDetectRequest(Model):
+    patient_id: str
+    trigger: str  # "patient_create" | "patient_update"
+    updated_domain: str | None = None
+
+
+class InternalDetectResponse(Model):
+    status: str
+    patient_id: str
+    trigger: str
 
 
 # ---------------------------------------------------------------------------
@@ -354,14 +374,9 @@ def _bootstrap_life_graph_snapshot(
             "name": patient.get("name") or "Unknown Patient",
             "age": patient.get("age"),
             "address": patient.get("address"),
-            "pharmacy_name": patient.get("pharmacy_name"),
-            "pharmacy_email": patient.get("pharmacy_email"),
-            "doctor_name": patient.get("doctor_name"),
-            "doctor_email": patient.get("doctor_email"),
             "active": int(patient.get("active") or 1),
             "created_at": datetime.now(tz=timezone.utc).isoformat(),
             "preferences": patient.get("preferences_json", {}),
-            "life_graph": patient.get("life_graph_json", {}),
             "intake_summary": query[:1000] if query else "",
         },
         "assigned_caregivers": [],
@@ -715,17 +730,7 @@ async def _dispatch_detection(
         )
     )
 
-    detection_msg = OnDemandDetectionRequest(
-        patient_id=pid,
-        trigger=trigger,
-        pass_id=pass_id,
-        updated_domain=None,
-        org_context={},
-        patient_snapshot=full_snapshot,
-        snapshot_meta=snapshot_meta,
-        domain_patient_context=None,
-    )
-
+    org = get_org_profile()
     failed_domains: list[str] = []
     for domain in target_domains:
         supervisor_address = SUPERVISOR_ADDRESS_BY_DOMAIN.get(domain)
@@ -734,6 +739,16 @@ async def _dispatch_detection(
             fan_out.record_timeout(domain)
             failed_domains.append(domain)
             continue
+        detection_msg = OnDemandDetectionRequest(
+            patient_id=pid,
+            trigger=trigger,
+            pass_id=pass_id,
+            updated_domain=None,
+            org_context={k: org.get(k) for k in ORG_CONTEXT_MAP.get(domain, [])},
+            patient_snapshot=full_snapshot,
+            snapshot_meta=snapshot_meta,
+            domain_patient_context=None,
+        )
         try:
             ctx.logger.info(
                 "[ROUTE] Detection pass_id=%s patient_id=%s -> domain=%s addr=%s",
@@ -806,12 +821,49 @@ async def post_message(ctx: Context, req: HttpMessagePost) -> HttpMessageRespons
     return await _route_query(ctx, req.content, user_sender_address=None)
 
 
+@executor.on_rest_post("/internal/detect", InternalDetectRequest, InternalDetectResponse)
+async def internal_detect(ctx: Context, req: InternalDetectRequest) -> InternalDetectResponse:
+    """Internal trigger: run detection for a specific patient without a chat message."""
+    if not _executor_ready:
+        ctx.logger.error(
+            "POST /internal/detect received but executor event loop is not ready — "
+            "agent startup has not completed; request rejected"
+        )
+        from fastapi import HTTPException
+        raise HTTPException(status_code=503, detail="Executor event loop not ready; retry after agent startup completes")
+    ctx.logger.info(
+        "POST /internal/detect patient_id=%s trigger=%s updated_domain=%s",
+        req.patient_id,
+        req.trigger,
+        req.updated_domain,
+    )
+    updated_fields = [req.updated_domain] if req.updated_domain else None
+    intent = IntentRoutingResult(
+        intent="detection",
+        domain=None,
+        confidence="high",
+        trigger=req.trigger,
+        updated_fields=updated_fields,
+    )
+    await _dispatch_detection(
+        ctx,
+        request_id=str(uuid4()),
+        query=f"internal detect {req.patient_id}",
+        user_sender_address=None,
+        intent=intent,
+        patient_id=req.patient_id,
+    )
+    return InternalDetectResponse(status="triggered", patient_id=req.patient_id, trigger=req.trigger)
+
+
 # ---------------------------------------------------------------------------
 # Startup
 # ---------------------------------------------------------------------------
 
 @executor.on_event("startup")
 async def log_startup_health(ctx: Context) -> None:
+    global _executor_ready
+    _executor_ready = True
     mailbox_client_present = executor.mailbox_client is not None
     agentverse_url = executor._agentverse.url if hasattr(executor, "_agentverse") else "unknown"
     mailbox_poll_url = (
@@ -938,6 +990,13 @@ async def handle_supervisor_detection_result(
         result.domain,
         fan_out.pending_domains(),
     )
+
+    for action in result.actions:
+        if action.type == "scheduling_task":
+            update_action(action.action_id, {"scheduling_status": "pending_approval"})
+            ctx.logger.info(
+                "scheduling_status=pending_approval set action_id=%s", action.action_id
+            )
 
     if fan_out.is_complete():
         await _finalize_detection_fan_out(ctx, fan_out)
@@ -1107,6 +1166,38 @@ async def heartbeat_and_timeout_sweep(ctx: Context) -> None:
             oldest_pending_age_seconds,
             chat_ingress_age_seconds,
         )
+
+
+# ---------------------------------------------------------------------------
+# Expiration loop
+# ---------------------------------------------------------------------------
+
+@executor.on_interval(period=900.0)
+async def expiration_check(ctx: Context) -> None:
+    """Mark overdue actions and emit deduped notifications for dashboard + asi_one channels."""
+    overdue = get_overdue_actions()
+    if not overdue:
+        return
+    ctx.logger.info("Expiration check: %d overdue action(s) found", len(overdue))
+    for action in overdue:
+        action_id = action["action_id"]
+        patient_id = action.get("patient_id", "")
+        mark_action_overdue(action_id)
+        for channel in ("dashboard", "asi_one"):
+            if has_been_notified(action_id, channel):
+                continue
+            if channel == "dashboard":
+                write_notification(
+                    type="overdue",
+                    action_id=action_id,
+                    patient_id=patient_id,
+                    title=f"Overdue: {action.get('type', 'task')} for patient {patient_id}",
+                    body=action.get("description", "Action review deadline has passed"),
+                )
+            log_expiration_notification(action_id, channel)
+            ctx.logger.info(
+                "Expiration notification logged action_id=%s channel=%s", action_id, channel
+            )
 
 
 # ---------------------------------------------------------------------------

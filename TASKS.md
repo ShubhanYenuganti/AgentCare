@@ -5,27 +5,27 @@ Audit basis: `MACOS_build_spec_v7_final.md` compared against current code in `ag
 
 ## Snapshot
 
-- Sprint 1 foundation is mostly present.
-- Sprint 2 is partially implemented.
+- Sprint 1 foundation complete.
+- Sprint 2 data-layer + executor core complete (sections 1 and most of 2 done). Remaining Sprint 2 work: action-chat pipeline, full intent handler surface.
 - Sprint 3–11 contain major remaining work, especially deterministic domain logic, patient update pipeline, scheduling workflow, and full dashboard UX.
 
 ## 1) Data Layer + Seed Gaps
 
-- [ ] Add missing life-graph tables to `data/schema.sql`: `emergency_contacts`, `medications`, `caregiver_notes`, `appointments`, `grocery`, `grocery_staples`, `financial_bills`, `financial_anomalies`.
-- [ ] Expand `action_history` schema to include remaining spec fields: `completion_date`, `assigned_caregiver`, `caregiver_options_json`, `outcome`.
-- [ ] Align `expiration_notifications` columns to include explicit `notified_at` semantics from spec.
-- [ ] Update `agents/shared/db.py` serialization to build spec-style full life graph from normalized tables (not only patient JSON blob + linked tables).
-- [ ] Add DB helper(s) needed for scheduling chat-selection flow (for example latest pending scheduling action retrieval by requester/session, not global heuristic).
-- [ ] Extend `data/seed.py` to populate new normalized domain tables with deterministic baseline data used by spec checks.
-- [ ] Seed data that supports all domain detection checks (appointments cadence, grocery staples/delivery cadence, bill due/autopay/anomaly history).
+- [x] Add missing life-graph tables to `data/schema.sql`: `emergency_contacts`, `medications`, `caregiver_notes`, `appointments`, `grocery`, `grocery_staples`, `financial_bills`, `financial_anomalies`.
+- [x] Expand `action_history` schema to include remaining spec fields: `completion_date`, `assigned_caregiver`, `caregiver_options_json`, `outcome`.
+- [x] Align `expiration_notifications` columns to include explicit `notified_at` semantics from spec.
+- [x] Update `agents/shared/db.py` serialization to build spec-style full life graph from normalized tables (not only patient JSON blob + linked tables).
+- [x] Add DB helper(s) needed for scheduling chat-selection flow (for example latest pending scheduling action retrieval by requester/session, not global heuristic).
+- [x] Extend `data/seed.py` to populate new normalized domain tables with deterministic baseline data used by spec checks.
+- [x] Seed data that supports all domain detection checks (appointments cadence, grocery staples/delivery cadence, bill due/autopay/anomaly history).
 
 ## 2) Executor + Internal Detection Pipeline Gaps
 
-- [ ] Implement executor internal endpoint `POST /internal/detect` (spec trigger path used by ingest + patient-update confirm).
-- [ ] Implement explicit `run_detection(patient_id, trigger, updated_domain)` flow callable from FastAPI/internal HTTP.
-- [ ] Inject domain-specific org context into each fan-out message using `ORG_CONTEXT_MAP` from DB org profile (currently fan-out sends empty org context).
-- [ ] Implement spec expiration loop behavior on executor (`@on_interval(900)`): fetch overdue actions, mark overdue, dedupe notifications, write dashboard notifications, optional ASI:One push.
-- [ ] Add scheduling-task post-processing in executor supervisor-result handler to set `scheduling_status="pending_approval"` for new scheduling tasks.
+- [x] Implement executor internal endpoint `POST /internal/detect` (spec trigger path used by ingest + patient-update confirm).
+- [x] Implement explicit `run_detection(patient_id, trigger, updated_domain)` flow callable from FastAPI/internal HTTP.
+- [x] Inject domain-specific org context into each fan-out message using `ORG_CONTEXT_MAP` from DB org profile (currently fan-out sends empty org context).
+- [x] Implement spec expiration loop behavior on executor (`@on_interval(900)`): fetch overdue actions, mark overdue, dedupe notifications, write dashboard notifications, optional ASI:One push.
+- [x] Add scheduling-task post-processing in executor supervisor-result handler to set `scheduling_status="pending_approval"` for new scheduling tasks.
 - [ ] Implement action-chat processing endpoint/path (`/process-action-chat` equivalent) for API `POST /actions/{id}/chat`.
 - [ ] Align intent handler surface with spec workflow: onboarding, scheduling query handling, action-bound modification/question handling, and general query fallback with DB-backed context.
 

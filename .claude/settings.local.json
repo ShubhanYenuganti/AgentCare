@@ -9,7 +9,20 @@
       "Bash(rtk git *)",
       "Bash(npm install *)",
       "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); hooks=d.get\\('hooks',{}\\); [print\\(k,v\\) for k,v in hooks.items\\(\\)]\")",
-      "Bash(volta install *)"
+      "Bash(volta install *)",
+      "Bash(openspec new *)",
+      "Bash(openspec --help)",
+      "Bash(npx openspec *)",
+      "Bash(openspec instructions *)",
+      "Bash(/Users/shubhan/.volta/bin/openspec instructions *)",
+      "Bash(install -d /Users/shubhan/Autocare/openspec/changes/data-layer-seed-and-executor-gaps/specs/normalized-life-graph /Users/shubhan/Autocare/openspec/changes/data-layer-seed-and-executor-gaps/specs/deterministic-seed-data /Users/shubhan/Autocare/openspec/changes/data-layer-seed-and-executor-gaps/specs/executor-internal-detect /Users/shubhan/Autocare/openspec/changes/data-layer-seed-and-executor-gaps/specs/foundation-runtime-bootstrap)",
+      "Bash(python3 *)",
+      "Bash(echo \"exit: $?\")",
+      "Bash(rg \"requester_address\\\\|scheduling_task\\\\|write_action\" /Users/shubhan/Autocare/agents --include=\"*.py\" -n)",
+      "Bash(rg -rn \"ActionDraft\\\\|SupervisorResult\" /Users/shubhan/Autocare/agents/shared/models.py)",
+      "Bash(rg -rn \"ActionDraft\" /Users/shubhan/Autocare/agents/)",
+      "Bash(python -m py_compile agents/executor/agent.py)",
+      "Bash(python -m py_compile data/seed.py)"
     ]
   }
 }
