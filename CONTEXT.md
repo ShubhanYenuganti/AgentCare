@@ -2,373 +2,501 @@
 
 Last updated: April 25, 2026
 
-This document is the current implementation context for MACOS and replaces the prior Sprint 1-only runbook. It is structured in the requested order:
+This document reflects the implementation state after three recent openspec changes:
+- `backend-domain-and-api-completion` (44/44 tasks — domain rules, scheduling, API, mock parity)
+- `dashboard-and-testing` (52/52 tasks — full 4-view dashboard, RTK Query, tests, docs)
 
-1. Current capabilities overlay (detailed)
-2. Change log against Sprint 1 baseline
-3. Change log against original Sprint 2 plan
+It supersedes all prior CONTEXT.md content. Structure:
 
-## 1) Current Capabilities Overlay
+1. Implemented features with local test instructions
+2. Remaining gaps from `MACOS_build_spec_v7_final.md`
 
-### 1.1 Runtime topology and execution model
+---
 
-- Agent stack is running as a 10-process topology:
-  - `executor`
-  - `health-supervisor`, `health-worker`
-  - `appointment-supervisor`, `appointment-worker`
-  - `grocery-supervisor`, `grocery-worker`
-  - `financial-supervisor`, `financial-worker`
-  - `scheduling-agent`
-- ASI:One/chat boundary remains executor-only mailbox ingress/egress.
-- Intra-stack routing remains local-first through `LocalFirstResolver` (`/submit` direct local HTTP).
-- Supervisors are event-driven handlers (no domain polling loops).
-- Executor still runs timeout/heartbeat loops for orchestration safety and fan-out cleanup.
+## 1. Implemented Features
 
-### 1.2 Executor intent routing and orchestration
+### 1.1 Full agent stack
 
-Executor supports `question`, `modification`, `scheduling`, and `detection` intents.
+**What:** 10-process agent topology running locally via `python -m agents.run_all`. Executor → Domain Supervisors (health, appointment, grocery, financial) → Workers, plus Scheduling Agent.
 
-- `question`:
-  - Routes to domain supervisor (domain from classifier, fallback `health`).
-- `modification`:
-  - Routes to domain supervisor with `ModificationRequest`.
-- `scheduling`:
-  - Routes to `scheduling-agent` via mock contract path.
-- `detection`:
-  - Performs patient resolution and life-graph snapshot preparation.
-  - Fans out to selected domains.
-  - Aggregates partial results with per-domain timeout metadata.
+**How to test:**
+```bash
+SQLITE_DB_PATH=data/life_graph.db \
+EXECUTOR_INTERNAL_URL=http://localhost:8001 \
+MOCK_API_BASE=http://localhost:8000 \
+python -m agents.run_all
+```
+In another terminal:
+```bash
+curl -s http://localhost:8001/health | python3 -m json.tool
+```
+**Expected:** `{"status": "ok"}` from all agents, health logs appear in the run_all console.
 
-Intent classification:
+---
 
-- Primary: LLM JSON classifier.
-- Fallback: keyword classifier.
+### 1.2 Explicit domain detection rules
 
-Timeout policies:
+**What:** All four domain workers run deterministic rule checks before (and merged with) the LLM pass.
 
-- Request timeout: 45 seconds for normal pending request state.
-- Detection domain timeout budget: 300 seconds per fan-out pass.
+#### Health (`agents/health/worker.py`)
+- **Refill due** — medication `refill_due` within 7 days → tier_2 draft to pharmacy
+- **Missed dose + worsening** — consecutive gap ≥ 3 days + LLM note assessment → tier_1 escalation to prescriber
+- **OpenFDA interaction** — live call to `api.fda.gov/drug/label.json` for each co-prescribed medication pair → tier_1 if interaction found
+- **OpenFDA recall** — live call to `api.fda.gov/drug/enforcement.json` per medication → tier_0 if active recall
 
-### 1.3 Detection targeting and patient resolution
+#### Appointment (`agents/appointment/worker.py`)
+- **Overdue appointment** — `months_since_last_visit > recommended_frequency_months` → tier_1 scheduling draft
+- **Visit prep** — appointment within 48h, no existing prep action → tier_2 LLM summary
+- **Transport planning** — appointment within 7 days + `transport_required=True` → calls Google Maps Distance Matrix (skipped gracefully if `GOOGLE_MAPS_API_KEY` absent) → `manual_action_type="transport"` scheduling task
 
-Detection now supports patient targeting beyond `patient_id` regex only.
+#### Grocery (`agents/grocery/worker.py`)
+- **Delivery staleness** — `days_since_last_delivery > max(staple.frequency_days)` → calls `POST /mock/instacart/cart` → tier_2 grocery_delivery scheduling task
+- **Dietary conflict** — staple vs `dietary_restrictions` mismatch → tier_2 LLM draft
+- **Supply reorder** — quantity at or below threshold → calls `POST /mock/amazon/reorder` → tier_2 supply_reorder scheduling task
 
-- For `patient_create` trigger:
-  - Bypasses name resolution.
-  - Uses provided/extracted `patient_id` or creates `pt_create_<pass>` synthetic id.
-  - Uses full DB life graph if present, else bootstraps a complete life-graph envelope.
-- For `patient_update` trigger:
-  - Resolution order:
-    - explicit `patient_id` if provided and active
-    - name extraction via `find_active_patients_by_name_query(query)`
-  - Name lookup supports unique partial matches (for example `Margaret`), and blocks when ambiguous.
-  - If no unique active patient match is found, detection is blocked with a validation response.
+#### Financial (`agents/financial/worker.py`)
+- **Bill due alert** — unpaid bill due within 5 days, autopay off → tier_2 (tier_1 if ≤ 2 days)
+- **Missed autopay** — autopay bill past due, no completion record → tier_1 alert
+- **Spending anomaly** — current bill > 150% of trailing average from `financial_anomalies` → tier_1 or tier_2 LLM analysis
 
-### 1.4 Life-graph snapshot strategy
+**How to test (unit):**
+```bash
+python -m pytest tests/test_health_detection.py \
+  tests/test_appointment_detection.py \
+  tests/test_grocery_detection.py \
+  tests/test_financial_detection.py -v
+```
+**Expected:** 24 tests pass. Tests seed deterministic patient data and assert on `ActionDraft` type, domain, urgency level, and `patient_id` from the parse pipeline.
 
-Detection uses complete patient life graph as source snapshot, then domain-specific slicing.
+**How to test (via API):**
+```bash
+# Seed DB and start API
+python data/seed.py
+python -m uvicorn api.main:app --port 8000
 
-- Executor snapshot source:
-  - Full snapshot from `serialize_complete_life_graph(patient_id)`.
-  - Snapshot metadata includes key list, byte size, source, generation timestamp.
-- Supervisor handling:
-  - Reads full snapshot.
-  - Parses/truncates to domain-relevant JSON via `parse_life_graph_for_domain`.
-  - Passes only `domain_patient_context` to worker.
-- Domain parser behavior:
-  - Top-level allowlist per domain.
-  - Domain filter for `actions`, `patient_updates`, `action_chat`, `notifications`, `expiration_notifications`.
-  - `caregiver_schedule` retained only for appointment domain.
+# Trigger patient_create detection for pt_001
+curl -s -X POST http://localhost:8000/ingest/text \
+  -H "Content-Type: application/json" \
+  -d '{"text": "Margaret Chen, 74, 123 Sunset Blvd. Lisinopril 10mg daily."}' | python3 -m json.tool
+```
+**Expected:** `{"success": true, "data": {"patient_id": "...", "detect_status": ...}}`. After a few seconds, `GET /actions` returns draft actions for the new patient.
 
-### 1.5 Detection fan-out domain selection
+---
 
-- `patient_create` -> full fan-out: `health`, `appointment`, `grocery`, `financial`.
-- `patient_update` -> field-based pre-filter using `_FIELD_DOMAIN_MAP` (fallback to all if no mapped field hit).
+### 1.3 Supervisor risk-scoring pass
 
-### 1.6 Supervisor behavior in production paths
+**What:** All four domain supervisors call `_risk_score_drafts()` (`agents/shared/supervisor_utils.py`) after receiving worker drafts. Single LLM call reassesses urgency framing and recalculates `review_by` before writing to DB.
 
-All four domain supervisors (`health`, `appointment`, `grocery`, `financial`) now implement:
+**How to test:**
+```bash
+python -m pytest tests/test_detection_life_graph_context.py -v -k "supervisor"
+```
+**Expected:** Tests pass confirming supervisor correctly parses and scopes life graph context per domain before the risk pass.
 
-- Detection handling:
-  - receive `OnDemandDetectionRequest`
-  - parse domain life-graph context
-  - forward to worker
-  - validate worker drafts for API template requirements
-  - issue one correction retry when payload validation fails (`detection_correction` metadata)
-  - drop invalid drafts after retry budget
-  - persist valid drafts with `write_action`
-  - return `SupervisorResult` to executor
-- Modification handling:
-  - set `modification_in_progress`
-  - route `ModificationTask` to worker
-  - persist updated draft via `replace_draft`
-  - return `ModificationResult`
-- Question handling:
-  - build question task with patient life-graph lookup context
-  - route `QuestionTask` to worker
-  - return `QuestionAnswer`
+---
 
-### 1.7 Worker behavior and domain detection capabilities
+### 1.4 Health modification and question pipelines
 
-All domain workers use LLM-backed detection prompts plus API capability guidance from `agents/shared/api_capabilities.py`.
+**What:**
+- Modification: `PATCH /actions/{id}` with `modification_instruction` → executor routes to health supervisor → live-data keyword check → optional health worker API call → LLM revision → review pass → retry if review fails → `replace_draft()` + notification
+- Question: `POST /actions/{id}/chat` → executor routes to domain supervisor → freshness-keyword check → optional live API lookup by worker → LLM answer → chat history written
 
-Health worker detection:
+Non-health domains return a "not supported" response for modification requests.
 
-- Focus: medications, refill risks, monitoring/safety.
-- Calls mock GET lookup before drafting:
-  - `GET /mock/cvs/available`
-- Produces draft JSON with:
-  - urgency tier
-  - optional API-executable `manual_action_type`
-  - required template-v1 `api_payload` for executable actions
-  - `recipient_email`, `recipient_type`
+**How to test:**
+```bash
+# Start API and agent stack first, then:
+ACTION_ID=$(curl -s http://localhost:8000/actions | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['data'][0]['action_id'])")
 
-Appointment worker detection:
+# Send modification
+curl -s -X PATCH http://localhost:8000/actions/$ACTION_ID \
+  -H "Content-Type: application/json" \
+  -d '{"modification_instruction": "Add that Dr. Patel should be cc'd", "idempotency_key": "test-001"}' | python3 -m json.tool
 
-- Focus: transport, clinic visits, caregiver scheduling, check-ins.
-- Calls mock GET lookup before drafting:
-  - `GET /mock/cal/available` (patient filtered)
-- Produces template-v1 API payloads for booking/availability routes where applicable.
+# Check modification in progress flag
+curl -s http://localhost:8000/actions/$ACTION_ID | python3 -m json.tool
 
-Grocery worker detection:
+# Send a question via chat
+curl -s -X POST http://localhost:8000/actions/$ACTION_ID/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "Why is this flagged tier 1?"}' | python3 -m json.tool
 
-- Focus: grocery delivery coverage, diet mismatch, food safety, weekly planning.
-- Uses domain-scoped life-graph context + API guidance block.
-- Produces template-v1 payloads for grocery/supply execution routes where applicable.
+# Fetch chat history
+curl -s http://localhost:8000/actions/$ACTION_ID/chat-history | python3 -m json.tool
+```
+**Expected:** `modification_in_progress=1` set immediately on PATCH; after agent processes, `draft_content` updated and `modification_in_progress=0`. Chat history shows user message and agent reply.
 
-Financial worker detection:
+---
 
-- Focus: bill deadlines, autopay opportunities, insurance/benefit gaps, assistance programs.
-- Uses domain-scoped life-graph context + API guidance block.
-- Produces template-v1 payloads only when it identifies concrete executable actions.
+### 1.5 Scheduling agent workflow
 
-Common worker behavior:
+**What:** Full `SchedulingQuery` flow: executor receives scheduling query → sends to scheduling agent → agent calls `POST /mock/caregivers/available` → persists options in `caregiver_options_json` → sends numbered option list to requester. Chat-selection handler parses numeric reply or "cancel" → assigns caregiver, sets `scheduling_status="unconfirmed"`, books slot, writes notification.
 
-- Supports correction metadata sent from supervisors to repair invalid API payloads.
-- Falls back to stub draft when LLM is unavailable or parsing fails.
-- Uses structured `[RECV]/[PARSE]/[LLM-CALL]/[LLM-RESULT]/[SEND]` logs.
+**How to test (REST API path):**
+```bash
+# Create a scheduling action (pending_approval)
+# Then assign, confirm, decline, or cancel via REST:
 
-### 1.8 API payload contract for executable actions
+curl -s -X POST http://localhost:8000/scheduling/$ACTION_ID/assign \
+  -H "Content-Type: application/json" \
+  -d '{"caregiver_id": "cg_001"}' | python3 -m json.tool
+# Expected: scheduling_status="unconfirmed", assigned_caregiver="cg_001"
 
-The executable payload contract has shifted from freeform request JSON to template-v1 structured parameter nodes.
+curl -s -X POST http://localhost:8000/scheduling/$ACTION_ID/confirm | python3 -m json.tool
+# Expected: scheduling_status="confirmed", completed=1
 
-Template shape:
+curl -s -X POST http://localhost:8000/scheduling/$ACTION_ID/decline | python3 -m json.tool
+# Expected: scheduling_status="pending_approval", assigned_caregiver cleared, escalation notification written
 
-```json
-{
-  "template_version": "v1",
-  "call": {
-    "route_key": "POST /mock/... or POST resend:/emails",
-    "provider": "mock or live",
-    "parameters": {
-      "field_name": {"value": "..."}
-    }
-  }
-}
+curl -s -X POST http://localhost:8000/scheduling/$ACTION_ID/cancel | python3 -m json.tool
+# Expected: scheduling_status="cancelled", assigned_caregiver cleared
 ```
 
-Behavior:
+**How to test (E2E pytest):**
+```bash
+python -m pytest tests/test_scheduling_e2e.py -v
+```
+**Expected:** 14 tests pass covering assign, confirm, decline, cancel, 409/404 error paths, and DB state verification.
 
-- Workers are prompted to fill `parameters.<field>.value` instead of generating raw POST body JSON.
-- Approve flow extracts parameter nodes and deterministically builds final POST bodies.
-- Validator enforces required params plus `recipient_email` and `recipient_type` on API-completable drafts.
+---
 
-### 1.9 Action approval execution path
+### 1.6 Complete FastAPI REST surface
 
-`POST /actions/{action_id}/approve` now executes API steps instead of render-only behavior.
+**What:** All spec-defined endpoints implemented with `{success, data, error}` envelope:
 
-Execution planner currently supports:
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/actions?sort=rank` | Ranked action list (urgency score) |
+| GET | `/actions/{id}` | Single action |
+| PATCH | `/actions/{id}` | Modification instruction / mark reviewed |
+| POST | `/actions/{id}/dismiss` | Mark dismissed + completed |
+| POST | `/actions/{id}/chat` | Send chat message |
+| GET | `/actions/{id}/chat-history` | Full chat thread |
+| GET | `/patients` | Enriched list: pending_action_count, highest_urgency_level |
+| GET | `/patients/{id}` | Full detail: life_graph, pending_actions, action_history |
+| POST | `/patients/{id}/update` | Staged update (LLM classification → proposed_changes) |
+| POST | `/patients/{id}/update/{uid}/confirm` | Apply staged update → trigger detection |
+| GET | `/patients/{id}/update-history` | All update records |
+| POST | `/ingest/text` | Text extraction → write patient → trigger detect |
+| POST | `/ingest/file` | PDF/image extraction → write patient → trigger detect |
+| GET | `/caregivers` | All caregivers with today's availability |
+| GET | `/caregivers/{id}/schedule` | 14-day schedule grid |
+| GET | `/caregivers/{id}/assignments` | Assignment list with pending counts |
+| POST | `/scheduling/{id}/assign` | pending_approval → unconfirmed |
+| POST | `/scheduling/{id}/confirm` | unconfirmed → confirmed + completed=1 |
+| POST | `/scheduling/{id}/decline` | Reset to pending_approval + escalation |
+| POST | `/scheduling/{id}/cancel` | Cancel → scheduling_status="cancelled" |
+| GET | `/notifications` | Unread dashboard notifications |
+| POST | `/notifications/{id}/read` | Mark read |
+| GET | `/org` | Org profile |
+| PUT | `/org` | Update org profile |
 
-- Mock POST execution from inferred route and extracted template params.
-- Optional Google Maps Distance Matrix call when enabled and route/domain qualify.
-- Resend email notification execution when recipient email exists.
+**How to test:**
+```bash
+python -m pytest tests/test_api.py -v --tb=short
+# Also:
+python -m pytest tests/integration/ -v
+```
+**Expected:** Most tests in `test_api.py` pass (4 pre-existing failures unrelated to recent changes — see section 2.3). All 15 integration tests pass.
 
-Success/failure semantics:
+---
 
-- Required-step failures return 502 with execution detail.
-- Execution metadata is merged into stored `api_payload.approval_execution`.
-- Successful required steps mark action completed and reviewed.
+### 1.7 Mock API surface
 
-### 1.10 Mock API surface currently implemented
+**What:** Six mock endpoints implementing spec contracts:
 
-Implemented mock calls:
+- `GET /mock/cvs/available` — CVS pharmacy availability lookup
+- `POST /mock/cvs/refill` — CVS refill request → `confirmation_id: CVS-YYYYMMDD-XXXXXX`
+- `GET /mock/cal/available` — calendar slot lookup
+- `POST /mock/cal/book` — appointment booking → next business day 10:00am slot
+- `POST /mock/instacart/cart` — grocery cart creation → `cart_id: INST-...`
+- `POST /mock/amazon/reorder` — supply reorder → `order_id: AMZ-...`
+- `POST /mock/caregivers/available` — live SQLite query for available caregivers (assigned-first sort, 3-day fallback)
 
-- `GET /mock/cvs/available`
-- `POST /mock/cvs/refill`
-- `GET /mock/cal/available`
-- `POST /mock/cal/book`
-- `POST /mock/instacart/cart`
-- `POST /mock/amazon/order`
-- `POST /mock/amazon/reorder` (alias)
-- `POST /mock/caregivers/available`
+**How to test:**
+```bash
+python -m pytest tests/test_mock_api_coverage.py -v
+python -m pytest tests/test_mock_snapshots.py -v
+```
+**Expected:** All mock API coverage and snapshot tests pass with stable response envelope shapes.
 
-Notes:
+---
 
-- `POST /mock/caregivers/available` queries SQLite caregiver schedule + assignments and includes fallback date scanning.
-- `GET` mock lookups are wired into detection prompts where currently available in worker implementations.
+### 1.8 Executor expiration loop
 
-### 1.11 FastAPI and dashboard current state
+**What:** Runs every 900s on executor. Fetches actions where `review_by < now AND completed=0 AND is_overdue=0`, marks each `is_overdue=1, urgency_level=tier_0, escalation_count+=1`, dedupes via `expiration_notifications` table, writes dashboard notification per action once.
 
-FastAPI:
+**How to test:**
+```bash
+python -m pytest tests/test_expiration_loop.py -v
+```
+**Expected:** 10 tests pass covering:
+- `test_dashboard_notification_deduped` — exactly 1 entry after 2 loop runs
+- `test_asi_one_notification_deduped` — exactly 1 entry for asi_one channel
+- `test_both_channels_exactly_one_each` — N loop runs still produce 1 entry each channel
+- `test_mark_action_overdue_sets_is_overdue_flag` — DB confirms `is_overdue=1, urgency_level=tier_0`
 
-- Mounted routers: `actions`, `patients`, `caregivers`, `scheduling`, `notifications`, `ingest`, `org`, and `mock`.
-- Most business endpoints now use shared SQLite helpers and standard envelope `{success,data,error}`.
+---
 
-Dashboard:
+### 1.9 Patient ingest and staged update pipeline
 
-- React Router views for Actions, Patients, Caregivers, Org are wired to live API reads.
-- Loading, empty, and error states are implemented.
-- UI remains functional/minimal (not full design-sprint polish).
+**What:**
+- `POST /ingest/text` — LLM extracts patient fields → `write_patient()` → fires `patient_create` detect
+- `POST /ingest/file` — PDF via pdfplumber or image via Claude vision → same pipeline
+- `POST /patients/{id}/update` — LLM classifies update → returns `proposed_changes` with `requires_confirmation: true`
+- `POST /patients/{id}/update/{uid}/confirm` — applies staged changes → fires `patient_update` detect with domain hint
+- Removal operations use `active=0` soft-delete across all normalized life-graph tables
 
-### 1.12 Data layer state
+**How to test:**
+```bash
+python -m pytest tests/integration/test_patient_update_pipeline.py \
+  tests/integration/test_ingest_file.py -v
+```
+**Expected:** 9 tests pass covering submit→confirm flow, update history, file ingest DB write, and detect_status field in response.
 
-SQLite data layer includes:
+---
 
-- deterministic schema/seed baseline from Sprint 1
-- complete life-graph serializer for executor/supervisor detection flows
-- action lifecycle persistence helpers
-- ranking helpers for action feed ordering
-- caregiver availability/scheduling support helpers
+### 1.10 Executor detection fan-out logic
 
-### 1.13 Test coverage focus areas
+**What:** `_detection_domains_for_trigger(trigger, updated_fields, domain_hint)`:
+- `patient_create` → all 4 domains
+- `patient_update` with `domain_hint="health"` → health only
+- `patient_update` with no hint → all 4 domains (or field-mapped subset)
 
-Current tests explicitly cover:
+**How to test:**
+```bash
+python -m pytest tests/integration/test_executor_detect.py -v
+```
+**Expected:** 6 tests pass confirming fan-out domain selection for all trigger/hint combinations.
 
-- Sprint 1 architecture regressions
-- intent routing and detection fan-out logic
-- complete life-graph serialization and domain parser behavior
-- name-query patient resolution including unique partial matches and ambiguity
-- API capability template validation and extraction
-- mock API route behavior
-- approve success/failure response behavior
+---
 
-## 2) Change Log Against Sprint 1 Baseline
+### 1.11 Full dashboard — four views
 
-Sprint 1 baseline was scaffold + mock topology. The current system has moved significantly beyond that baseline.
+**What:** React dashboard at `http://localhost:5173` built with RTK Query, lazy-loaded routes, Redux Provider.
 
-### 2.1 Orchestration and intent
+**Run:**
+```bash
+# In one terminal — start FastAPI:
+python data/seed.py
+SQLITE_DB_PATH=data/life_graph.db python -m uvicorn api.main:app --port 8000
 
-- Sprint 1: keyword-to-domain mock routing.
-- Current: intent-first routing with typed request flows and detection fan-out aggregation.
+# In another terminal — start Vite dev server:
+npm run dev
+# Opens at http://localhost:5173
+```
 
-### 2.2 Detection trigger handling
+#### View 1 — Action Feed (`/actions`)
 
-- Sprint 1: scaffold-only mock detection semantics.
-- Current:
-  - `patient_create` and `patient_update` detection paths are implemented.
-  - `patient_create` bypasses name detection and uses full/bootstrap life graph.
-  - `patient_update` resolves by active patient ID or unique full/partial name query.
+- Polls `GET /actions?sort=rank` every 10 seconds
+- Each action renders as an `ActionCard` with one of three variants:
+  - **health-modify**: "Modify Draft" (opens DraftModal) + "Ask" (opens ActionChatPanel)
+  - **scheduling**: "View Scheduling" (navigates to `/caregivers` with action pre-selected)
+  - **Q&A**: "Ask" (opens ActionChatPanel)
+- Red "OVERDUE" banner on cards with `is_overdue=1`
+- Urgency tier border/badge: red (tier_1), amber (tier_2), green (tier_3)
+- "Modify Draft" disabled with lock text when `modification_in_progress=1`
+- `ActionChatPanel` polls `GET /actions/{id}/chat-history` every 3s while open
+- `DraftModal` submits `PATCH /actions/{id}` with `modification_instruction` + fresh `idempotency_key`
 
-### 2.3 Life-graph usage
+**Expected on load:** Seeded overdue action for Dorothy Kim (Metformin missed 4 days) appears at top with red OVERDUE banner and tier_0 urgency.
 
-- Sprint 1: serializer existed, not used as domain-scoped detection contract.
-- Current:
-  - executor sends complete life graph snapshot
-  - supervisors parse full snapshot into domain-relevant context
-  - workers receive scoped JSON only (`domain_patient_context`)
+#### View 2 — Patient Roster (`/patients`)
 
-### 2.4 Domain worker execution
+- Two-column layout: patient sidebar (names, pending count, urgency pill) + detail panel
+- Selecting a patient shows: life graph sections (health, appointments, grocery, financial, emergency contacts), pending actions summary, action history accordion
+- "+" button opens Add Patient modal with Text Ingest and File Upload tabs
+- Update tab: staged confirmation state machine `idle → submitting → awaiting_confirmation → confirmed | cancelled`
+- Update History tab: `GET /patients/{id}/update-history`
 
-- Sprint 1: workers returned deterministic mock strings.
-- Current:
-  - workers run LLM-based detection/modification/question flows
-  - return typed outputs (`ActionDraft`, `ModificationDraft`, `QuestionApiResult`)
-  - include API execution fields for actionable drafts
+**Expected on load:** 3 seeded patients (Margaret Chen, Robert Harris, Dorothy Kim) appear in sidebar. Clicking Margaret shows her medications, cardiology appointment, and grocery/financial data.
 
-### 2.5 Supervisor responsibilities
+#### View 3 — Caregiver Management (`/caregivers`)
 
-- Sprint 1: forward/return mock roundtrip.
-- Current:
-  - supervisors own persistence and lifecycle handling
-  - API payload validation + correction retry is implemented
-  - invalid drafts are dropped with explicit logging
+- Left: scheduling strip (actions with `scheduling_status` in `["pending_approval", "unconfirmed"]`) with assignment dropdowns
+- Left bottom: caregiver list
+- Right: caregiver detail with 14-day schedule grid + assignment list
+- Confirm/Decline buttons on unconfirmed actions
+- Deep-link preselect: navigating from a scheduling ActionCard highlights the action row in the strip
 
-### 2.6 API behavior
+**Expected:** If agent stack is running and a scheduling task exists, it appears in the strip. Selecting "cg_001 — Sarah Okafor" shows her 14-day schedule grid.
 
-- Sprint 1: most routers were placeholders.
-- Current:
-  - actions/patients/caregivers/scheduling/notifications/org use live SQLite helpers
-  - approve endpoint executes mock/live calls and records execution metadata
-  - standardized response envelopes are used broadly
+#### View 4 — Org Dashboard (`/org`)
 
-### 2.7 Mock provider ecosystem
+- Org summary: name, counts (protocols, caregivers, patients)
+- 4 metric cards: total pending, total overdue, 30-day completion rate, avg urgency score
+- Protocol cards per protocol in org profile
+- Caregiver roster table
+- "Edit Org Profile" form: `PUT /org` on submit, summary refreshes
 
-- Sprint 1: mock provider layer not functionally integrated.
-- Current:
-  - multiple mock GET/POST routes implemented and tested
-  - workers and approve path use these routes for detection context and action execution
+**Expected on load:** "Sunrise Care Org" summary. Pending/overdue counts match `GET /actions`. Edit form pre-fills with current org fields.
 
-### 2.8 Agent prompting and API contract quality
+---
 
-- Sprint 1: no structured API payload contract.
-- Current:
-  - unified route catalog in `agents/shared/api_capabilities.py`
-  - template-v1 payload schema enforced
-  - workers receive domain API guidance plus global template catalog
+### 1.12 Playwright E2E test suite
 
-### 2.9 Observability and logging
+**What:** 4 spec files in `dashboard/e2e/` covering all views, with `playwright.config.ts` that starts both FastAPI and Vite dev server as webServer fixtures.
 
-- Sprint 1: scaffold logging.
-- Current:
-  - verbose lifecycle logs across executor/supervisors/workers/approve flow
-  - explicit parse/route/validate/send markers
-  - correction and drop outcomes are logged with pass/action identifiers
+**Run:**
+```bash
+cd dashboard && npx playwright test --project=chromium
+```
+**Expected:** All E2E tests pass (tests degrade gracefully when no seed data exists — most assertions are conditional on action/patient availability).
 
-## 3) Change Log Against Original Sprint 2 Plan
+---
 
-Original Sprint 2 plan is the OpenSpec change set at:
+### 1.13 Test suite summary
 
-- `openspec/changes/implement-sprint-2-architecture-aligned-runtime/`
+```bash
+# Run all Python tests
+python -m pytest tests/ -q
 
-The current implementation both fulfills major Sprint 2 goals and adds post-plan upgrades.
+# Run only new tests from recent changes
+python -m pytest tests/test_health_detection.py \
+  tests/test_appointment_detection.py \
+  tests/test_grocery_detection.py \
+  tests/test_financial_detection.py \
+  tests/test_scheduling_e2e.py \
+  tests/test_expiration_loop.py \
+  tests/integration/ -v
+```
 
-### 3.1 Items implemented from original Sprint 2 intent
+**Expected totals:** 184 collected, ~179 pass, 4 pre-existing failures (see 2.3 below).
 
-- Production contracts and typed flows are in place for detection, modification, and question paths.
-- Executor intent classification and bounded detection fan-out are implemented.
-- Partial-success fan-out aggregation behavior is implemented.
-- Supervisors and workers for all four domains are productionized relative to mock baseline.
-- API routes are live-wired for core domains and use shared envelope patterns.
-- Dashboard routes consume live APIs with loading/empty/error states.
-- Sprint 1 architecture guardrails remain preserved:
-  - executor mailbox boundary
-  - local-first in-stack routing
-  - event-driven supervisors
+New tests added by recent changes: 65 (24 domain detection + 14 scheduling E2E + 10 expiration loop + 5 integration/ingest + 6 executor fan-out + 6 TBD).
 
-### 3.2 Post-plan upgrades beyond original Sprint 2 text
+---
 
-These upgrades were layered after original Sprint 2 definition and are now part of current baseline.
+### 1.14 Documentation
 
-- Name-resolved detection targeting:
-  - active patient lookup from query text
-  - unique partial-name support
-  - ambiguity blocking with explicit feedback
-- `patient_create` detection bypass path:
-  - no name resolution required
-  - bootstrap life graph generation when DB graph absent
-- Full-to-domain life-graph handoff model:
-  - executor sends full snapshot
-  - supervisors parse/truncate and pass scoped JSON to workers
-- Structured template-v1 API payload approach:
-  - workers fill parameter nodes
-  - approve endpoint extracts and builds deterministic request body
-- Expanded mock API catalog including GET enrichment and Amazon order support.
-- Supervisor detection correction loop for invalid API payload drafts.
-- Approve flow now supports all required mock/live steps currently available, not just rendering.
+- `README.md` — updated with full API contract table, runtime description, all features
+- `docs/architecture.md` — pipeline diagrams: internal detect, patient update staging, scheduling lifecycle, API payload contracts
+- `docs/demo-checklist.md` — 9 demo scenarios with step-by-step validation and expected DB state
 
-### 3.3 Partial / deferred / known gaps relative to original Sprint 2 aspirations
+---
 
-- Scheduling path is still mock-agent style (`MockDomainTask` / `MockSupervisorResult`) instead of fully typed production scheduling contracts.
-- Google Maps call path exists but is conditional and not default-on; future coverage is still planned.
-- Ingest forwarding expects executor `/ingest` internal endpoint, but executor currently exposes `/message`; this requires alignment for fully active ingest-trigger orchestration.
-- Dashboard remains function-first and does not yet reflect full late-sprint UX depth from master build spec.
+## 2. Remaining Gaps from `MACOS_build_spec_v7_final.md`
 
-### 3.4 Practical summary
+The following items from the build spec are **not yet implemented**. Each is labeled with the spec section that defines it.
 
-Current MACOS state is no longer Sprint 1 scaffold and is beyond the original Sprint 2 baseline in several orchestration and action-execution areas. The largest maturity gains are:
+### 2.1 Dashboard — notification bell and polling (Spec §8, hooks list)
 
-- detection targeting correctness (name + create/update trigger handling)
-- life-graph fidelity with domain-scoped worker context
-- structured API payload generation and deterministic approval execution
-- stronger supervisor validation/retry/drop controls and verbose execution telemetry
+The spec defines a `useNotifications` hook (10s poll) and a TopBar badge showing unread notification count. The current `AppShell.tsx` has no notification indicator. `GET /notifications` exists in the API but nothing in the dashboard calls it.
 
+**Missing:** Notification bell icon in TopBar, unread count badge, poll every 10s.
+
+---
+
+### 2.2 Dashboard — Toast and Banner shared components (Spec §8, `shared/` components)
+
+The spec defines reusable `Toast.tsx` (modification_complete, scheduling_update events) and `Banner.tsx` (overdue escalation announcements). These are not implemented. The current ActionCard renders inline banners rather than a shared `Banner` component.
+
+**Missing:** `Toast` system for live modification complete / scheduling update notifications. `Banner` shared component (current inline approach is functional but not spec-aligned).
+
+---
+
+### 2.3 Dashboard — draft version badge and update flash state (Spec §8, ActionCard)
+
+The spec calls for:
+- A draft version badge on ActionCard (e.g., "v2") reflecting `draft_version` from DB
+- An "update flash" state — brief visual highlight when the card's draft is updated
+
+`draft_version` is tracked in `action_history` but not read or displayed by `ActionCard.tsx`.
+
+**Missing:** Read `draft_version` from action data and display badge. Add transient flash highlight on draft update.
+
+---
+
+### 2.4 Appointment worker — post-visit extraction (Spec §6.7 Check 4)
+
+The spec defines a fourth appointment detection check: when the executor forwards caregiver visit notes, the LLM parses them into structured tasks and writes them to the life graph. This is not wired — the appointment worker currently only runs checks 1–3 (overdue, transport, visit prep).
+
+**Missing:** `@on_message` handler for executor-forwarded post-visit caregiver notes in appointment worker.
+
+---
+
+### 2.5 Google Maps live integration — default off (Spec §6.7 Check 2)
+
+Google Maps Distance Matrix is called only when `GOOGLE_MAPS_API_KEY` is set in the environment. With no key, transport planning check is skipped. The spec implies this check should fire (with a graceful fallback that still produces a transport scheduling task even without travel time data).
+
+**Missing:** Fallback transport draft when Maps key is absent (draft without ETA, not silently skipped).
+
+---
+
+### 2.6 ASI:One caregiver push (Spec §6.12 expiration loop)
+
+The expiration loop does attempt to push to `caregiver["asi_one_address"]` but all 10 seed caregivers have `asi_one_address: None`, so the push is always skipped. This is a data gap, not a code gap — the code path exists.
+
+**Missing:** Populated `asi_one_address` values in seed data (or demo caregiver configuration). The push code in `executor/agent.py` is already correct.
+
+---
+
+### 2.7 Pre-existing test failures (not caused by recent changes)
+
+Four tests were failing before the recent changes and remain unresolved:
+
+| Test | Root cause |
+|------|------------|
+| `test_api.py::test_create_patient_and_fetch` | `GET /patients/{id}` response structure changed — test expects flat `patient_id` key, API now returns enriched nested response |
+| `test_api.py::test_ingest_text_queued` | Ingest endpoint no longer returns `queued` field — returns `patient_id + detect_status` instead |
+| `test_detection_life_graph_context.py::test_serialize_complete_life_graph_includes_linked_entities` | Serializer output shape changed from Sprint 2 baseline |
+| `test_mock_api_coverage.py::test_caregivers_available` | DB state isolation issue when run in full suite (passes in isolation) |
+
+**Action needed:** Update these 4 pre-existing tests to match current API response shapes. They are not regressions from the recent changes.
+
+---
+
+### 2.8 Dashboard component file structure (Spec §2, directory layout)
+
+The spec defines a fine-grained component hierarchy (e.g., `PatientSidebar.tsx`, `PatientCard.tsx`, `MedicationPanel.tsx`, `ScheduleGrid.tsx` as separate files). The implementation consolidates these into 4 view files and 4 component files, which is functionally complete but does not match the spec's intended file organization.
+
+**Missing:** Component decomposition into the spec-defined file tree if strict spec adherence is required. Functionally equivalent but structurally divergent.
+
+---
+
+### 2.9 `useNotifications` and per-view polling hooks (Spec §2, hooks list)
+
+The spec defines a full set of RTK Query polling hooks: `useActions` (15s), `useActionChat` (3s), `useNotifications` (10s), `usePatients` (30s), `usePatient` (30s), `useCaregivers` (60s), `useCaregiver` (30s), `useCaregiverSchedule` (30s), `useSchedulingTasks` (15s), `useOrg` (300s).
+
+Current polling intervals: `useGetActionsQuery` (10s), `useGetChatHistoryQuery` (3s), all others on-demand only. The spec's longer polling intervals for less-urgent views (patients: 30s, org: 300s) are not currently configured.
+
+**Missing:** Per-hook polling intervals aligned to spec. `useSchedulingTasks` hook (currently the scheduling strip refetches from the action list, not a dedicated scheduling tasks endpoint). `useNotifications` hook.
+
+---
+
+## 3. How to Run Everything Locally
+
+### Prerequisites
+```bash
+pip install -r requirements.txt
+python data/seed.py
+```
+
+### Start the full stack
+```bash
+# Terminal 1 — FastAPI
+SQLITE_DB_PATH=data/life_graph.db \
+EXECUTOR_INTERNAL_URL=http://localhost:8001 \
+MOCK_API_BASE=http://localhost:8000 \
+ANTHROPIC_API_KEY=<your-key> \
+python -m uvicorn api.main:app --host 0.0.0.0 --port 8000
+
+# Terminal 2 — Agent stack (optional, needed for live detection/modification)
+SQLITE_DB_PATH=data/life_graph.db \
+EXECUTOR_INTERNAL_URL=http://localhost:8001 \
+MOCK_API_BASE=http://localhost:8000 \
+ANTHROPIC_API_KEY=<your-key> \
+python -m agents.run_all
+
+# Terminal 3 — Dashboard
+npm run dev
+# http://localhost:5173
+```
+
+### Run all tests
+```bash
+python -m pytest tests/ -q
+```
+
+### Run demo validation
+Follow `docs/demo-checklist.md` — 9 scenarios with step-by-step commands and expected DB state.

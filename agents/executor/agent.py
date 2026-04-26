@@ -29,6 +29,7 @@ from agents.shared.config import (
 from agents.shared.constants import AGENT_PORTS, DOMAIN_KEYWORDS, ORG_CONTEXT_MAP, SUPPORTED_DOMAINS
 from agents.shared.db import (
     find_active_patients_by_name_query,
+    get_action,
     get_org_profile,
     get_overdue_actions,
     get_patient,
@@ -41,7 +42,7 @@ from agents.shared.db import (
     write_notification,
     write_patient,
 )
-from agents.shared.llm import call_claude_json
+from agents.shared.llm import call_claude, call_claude_json
 from agents.shared.models import (
     ActionDraft,
     DetectionFanOutResult,
@@ -550,6 +551,26 @@ async def _route_query(
         action_id or "none",
     )
 
+    # --- Onboarding: no patient context and no action context ---
+    if not resolved_patient_id and not action_id and intent.intent not in ("detection", "question", "modification", "scheduling"):
+        onboarding_reply = (
+            "Welcome! To add a new patient, please provide:\n"
+            "1. Patient name and date of birth\n"
+            "2. Address\n"
+            "3. Primary care physician name\n"
+            "4. Current medications (if any)\n\n"
+            "You can say something like: 'Add patient John Smith, 75 years old, at 123 Main St, "
+            "doctor Dr. Jones, taking Lisinopril 10mg daily.'"
+        )
+        if user_sender_address:
+            await _send_terminal_chat_response(ctx, user_sender_address, onboarding_reply)
+        return HttpMessageResponse(
+            request_id=request_id,
+            routed_domain="onboarding",
+            routed_address="onboarding",
+            intent="onboarding",
+        )
+
     # --- Scheduling ---
     if intent.intent == "scheduling":
         return await _dispatch_scheduling(ctx, request_id, query, user_sender_address, intent, action_id)
@@ -561,6 +582,10 @@ async def _route_query(
     # --- Question ---
     if intent.intent == "question":
         return await _dispatch_question(ctx, request_id, query, user_sender_address, intent, resolved_patient_id, action_id)
+
+    # --- General query fallback ---
+    if intent.intent == "general" or (intent.intent not in ("scheduling", "modification", "question", "detection")):
+        return await _dispatch_general_query(ctx, request_id, query, user_sender_address, intent, resolved_patient_id)
 
     # --- Detection (fan-out) ---
     return await _dispatch_detection(ctx, request_id, query, user_sender_address, intent, patient_id)
@@ -587,15 +612,25 @@ async def _dispatch_scheduling(
             action_id=action_id,
         )
     )
-    task = MockDomainTask(
-        request_id=request_id,
-        domain="scheduling",
-        query=query,
-        user_sender_address=user_sender_address,
-        metadata={"intent": "scheduling", "orchestrator": "executor"},
+    # Resolve patient_id from action record if available
+    resolved_pid = "unknown"
+    if action_id:
+        action_record = await asyncio.to_thread(get_action, action_id)
+        if action_record:
+            resolved_pid = action_record.get("patient_id", "unknown")
+    if resolved_pid == "unknown":
+        resolved_pid = _resolve_patient_id_for_query(query, None) or "unknown"
+
+    scheduling_msg = SchedulingQuery(
+        action_id=action_id or request_id,
+        patient_id=resolved_pid,
+        manual_action_type="caregiver_scheduling",
+        description=query,
+        required_date=None,
+        requester_address=str(ctx.address),
     )
     try:
-        await ctx.send(routed_address, task)
+        await ctx.send(routed_address, scheduling_msg)
     except Exception as ex:
         request_state.remove_request(request_id)
         await _handle_dispatch_error(ctx, user_sender_address, request_id, "scheduling", ex)
@@ -632,12 +667,22 @@ async def _dispatch_modification(
             action_id=action_id,
         )
     )
+    current_draft = ""
+    action_type = "general"
+    if action_id:
+        action_record = await asyncio.to_thread(get_action, action_id)
+        if action_record:
+            current_draft = action_record.get("draft_content") or action_record.get("description") or ""
+            action_type = action_record.get("type") or "general"
+            if not resolved_pid or resolved_pid == "unknown":
+                resolved_pid = action_record.get("patient_id", resolved_pid)
+
     mod_request = ModificationRequest(
-        action_id=request_id,
+        action_id=action_id or request_id,
         patient_id=resolved_pid or "unknown",
         domain=domain,
-        action_type="general",
-        current_draft="",
+        action_type=action_type,
+        current_draft=current_draft,
         modification_instruction=query,
         life_graph_snapshot="{}",
     )
@@ -679,13 +724,21 @@ async def _dispatch_question(
             action_id=action_id,
         )
     )
+    current_draft = None
+    if action_id:
+        action_record = await asyncio.to_thread(get_action, action_id)
+        if action_record:
+            current_draft = action_record.get("draft_content") or action_record.get("description")
+            if not resolved_pid or resolved_pid == "unknown":
+                resolved_pid = action_record.get("patient_id", resolved_pid)
+
     q_request = QuestionRequest(
         action_id=request_id,
         patient_id=resolved_pid or "unknown",
         domain=domain,
         action_type="general",
         question=query,
-        current_draft=None,
+        current_draft=current_draft,
         life_graph_snapshot="{}",
     )
     try:
@@ -716,6 +769,45 @@ async def _extract_and_write_patient(query: str, candidate_id: str) -> str:
     )
     result["patient_id"] = candidate_id
     return write_patient(result)
+
+
+async def _dispatch_general_query(
+    ctx: Context,
+    request_id: str,
+    query: str,
+    user_sender_address: str | None,
+    intent: IntentRoutingResult,
+    patient_id: str | None,
+) -> HttpMessageResponse:
+    """Fallback: fetch patient life graph and answer directly via LLM."""
+    pid = patient_id or _resolve_patient_id_for_query(query, patient_id)
+    life_graph: dict = {}
+    if pid:
+        try:
+            life_graph = await asyncio.to_thread(serialize_complete_life_graph, pid) or {}
+        except Exception as exc:
+            ctx.logger.warning("[GENERAL-FALLBACK] life graph fetch failed: %s", exc)
+
+    system_prompt = (
+        "You are a care operations assistant. Answer the caregiver's question using the provided patient context. "
+        "Be concise and clinically accurate. If context is missing, say so clearly."
+    )
+    user_prompt = f"Question: {query}\n\nPatient context:\n{json.dumps(life_graph, indent=2)}"
+
+    try:
+        answer = await asyncio.to_thread(call_claude, system_prompt, user_prompt, 800)
+    except Exception as exc:
+        answer = f"Unable to answer: {exc}"
+
+    if user_sender_address:
+        await _send_terminal_chat_response(ctx, user_sender_address, answer)
+
+    return HttpMessageResponse(
+        request_id=request_id,
+        routed_domain="general",
+        routed_address="llm_fallback",
+        intent="general",
+    )
 
 
 async def _dispatch_detection(
@@ -1263,25 +1355,11 @@ async def heartbeat_and_timeout_sweep(ctx: Context) -> None:
             fo.record_timeout(domain)
         await _finalize_detection_fan_out(ctx, fo)
 
-    # Log heartbeat metrics
-    pending_snapshot = request_state.all_requests()
-    pending_count = len(pending_snapshot)
-    oldest_pending_age_seconds = 0.0
-    if pending_count:
-        oldest_created_at = min(p.created_at for p in pending_snapshot.values())
-        oldest_pending_age_seconds = (
-            datetime.now(tz=timezone.utc) - oldest_created_at
-        ).total_seconds()
+    pending_count = len(request_state.all_requests())
     chat_ingress_age_seconds = (
         (datetime.now(tz=timezone.utc) - _last_chat_ingress_at).total_seconds()
         if _last_chat_ingress_at
         else (datetime.now(tz=timezone.utc) - _started_at).total_seconds()
-    )
-    ctx.logger.info(
-        "Heartbeat pending_requests=%s oldest_pending_age_sec=%.1f chat_ingress_age_sec=%.1f",
-        pending_count,
-        oldest_pending_age_seconds,
-        chat_ingress_age_seconds,
     )
     if pending_count > 0 and chat_ingress_age_seconds >= MAILBOX_INGRESS_SILENCE_WARNING_SECONDS:
         ctx.logger.warning(

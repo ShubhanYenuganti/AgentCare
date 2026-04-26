@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from pathlib import Path
 
@@ -20,7 +21,9 @@ from agents.shared.constants import AGENT_PORTS
 import json
 
 from agents.shared.db import replace_draft, serialize_life_graph, set_modification_in_progress, write_action
+from agents.shared.llm import call_claude
 from agents.shared.life_graph_parser import parse_life_graph_for_domain
+from agents.shared.supervisor_utils import _risk_score_drafts
 from agents.shared.models import (
     ActionDraft,
     MockDomainTask,
@@ -325,6 +328,17 @@ async def handle_worker_result(
             result.pass_id, sorted(dropped_action_ids),
         )
 
+    original_request = _pending_detection_worker_request.get(result.pass_id)
+    org_context = (original_request.org_context if original_request else None) or {}
+    if drafts_to_persist:
+        try:
+            draft_dicts = [d.dict() for d in drafts_to_persist]
+            scored = _risk_score_drafts(draft_dicts, {}, org_context)
+            drafts_to_persist = [ActionDraft(**d) for d in scored]
+            ctx.logger.info("[RISK-SCORE] pass_id=%s scored %d drafts", result.pass_id, len(drafts_to_persist))
+        except Exception as exc:
+            ctx.logger.error("[RISK-SCORE] pass_id=%s failed: %s", result.pass_id, exc)
+
     for i, draft in enumerate(drafts_to_persist):
         ctx.logger.info(
             "[DRAFT] %d/%d action_id=%s type=%s urgency=%s review_by=%s desc=%r",
@@ -399,6 +413,8 @@ async def handle_modification_request(
         msg.action_id, _short(sender), _state_summary(),
     )
 
+    _LIVE_API_KEYWORDS = {"current", "latest", "today", "now", "recent", "live", "updated", "real-time"}
+    requires_live = any(kw in msg.modification_instruction.lower() for kw in _LIVE_API_KEYWORDS)
     task = ModificationTask(
         action_id=msg.action_id,
         patient_id=msg.patient_id,
@@ -406,7 +422,7 @@ async def handle_modification_request(
         action_type=msg.action_type,
         current_draft=msg.current_draft,
         modification_instruction=msg.modification_instruction,
-        requires_live_api=False,
+        requires_live_api=requires_live,
         api_context=None,
     )
     ctx.logger.info(
@@ -426,6 +442,26 @@ async def handle_modification_draft(
         draft.action_id, len(draft.revised_draft),
         _trunc(draft.changes_summary, 100), _short(worker_sender),
     )
+
+    try:
+        review_system = (
+            "You are a health-domain care review assistant. "
+            "Review the revised draft for clarity and correctness. "
+            "Return ONLY the final draft text — no markdown, no preamble. "
+            "If the draft is acceptable, return it unchanged."
+        )
+        review_user = (
+            f"Original modification instruction: (not available)\n"
+            f"Revised draft:\n{draft.revised_draft}\n\n"
+            "Return the final approved draft."
+        )
+        reviewed = await asyncio.to_thread(call_claude, review_system, review_user, 1500)
+        reviewed = reviewed.strip()
+        if reviewed:
+            draft = draft.copy(update={"revised_draft": reviewed})
+            ctx.logger.info("[REVIEW] action_id=%s review pass completed", draft.action_id)
+    except Exception as exc:
+        ctx.logger.warning("[REVIEW] action_id=%s review pass failed, using original: %s", draft.action_id, exc)
 
     try:
         replace_draft(draft.action_id, draft.revised_draft)
@@ -481,6 +517,11 @@ async def handle_question_request(
         "[STATE] Registered question action_id=%s executor=…%s | %s",
         msg.action_id, _short(sender), _state_summary(),
     )
+
+    _FRESHNESS_KEYWORDS = {"current", "latest", "today", "now", "recent", "live", "updated", "status"}
+
+    def _needs_live_api(question: str) -> bool:
+        return any(kw in question.lower() for kw in _FRESHNESS_KEYWORDS)
 
     # Fetch live patient data from the database so the worker can answer from real records
     patient_context = "{}"

@@ -13,10 +13,13 @@ from pydantic import BaseModel
 from agents.shared.db import (
     apply_patient_update,
     get_all_patients,
+    get_connection,
     get_patient,
     get_patient_update,
     get_patient_update_history,
+    get_pending_actions,
     serialize_complete_life_graph,
+    serialize_life_graph,
     write_patient,
     write_patient_update,
 )
@@ -96,12 +99,71 @@ class PatientUpdateBody(BaseModel):
     caregiver_id: str | None = None
 
 
+_URGENCY_ORDER = {"tier_0": 0, "tier_1": 1, "tier_2": 2, "tier_3": 3}
+
+
+def _enrich_patient_list(patients: list[dict]) -> list[dict]:
+    if not patients:
+        return patients
+    patient_ids = [p["patient_id"] for p in patients]
+    placeholders = ",".join("?" * len(patient_ids))
+    with get_connection() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT a.patient_id,
+                   COUNT(*) AS pending_action_count,
+                   SUM(a.is_overdue) AS overdue_action_count,
+                   a.urgency_level,
+                   c.name AS assigned_caregiver_name
+            FROM action_history a
+            LEFT JOIN caregivers c ON c.caregiver_id = a.assigned_caregiver
+            WHERE a.completed=0 AND a.patient_id IN ({placeholders})
+            GROUP BY a.patient_id, a.urgency_level, c.name
+            """,
+            patient_ids,
+        ).fetchall()
+
+    from collections import defaultdict
+    data: dict[str, dict] = defaultdict(lambda: {
+        "pending_action_count": 0,
+        "overdue_action_count": 0,
+        "highest_urgency_level": None,
+        "assigned_caregiver_name": None,
+    })
+    for row in rows:
+        pid = row[0]
+        data[pid]["pending_action_count"] += row[1] or 0
+        data[pid]["overdue_action_count"] += row[2] or 0
+        urgency = row[3]
+        current = data[pid]["highest_urgency_level"]
+        if urgency and (current is None or _URGENCY_ORDER.get(urgency, 99) < _URGENCY_ORDER.get(current, 99)):
+            data[pid]["highest_urgency_level"] = urgency
+        if row[4] and not data[pid]["assigned_caregiver_name"]:
+            data[pid]["assigned_caregiver_name"] = row[4]
+
+    for p in patients:
+        pid = p["patient_id"]
+        p.update(data[pid])
+    return patients
+
+
 @router.get("")
 async def list_patients():
     try:
-        return ok(get_all_patients())
+        return ok(_enrich_patient_list(get_all_patients()))
     except Exception as exc:
         return JSONResponse(status_code=500, content=err(str(exc)))
+
+
+def _get_action_history(patient_id: str) -> list[dict]:
+    with get_connection() as conn:
+        cur = conn.execute(
+            "SELECT * FROM action_history WHERE patient_id=? AND completed=1 ORDER BY completion_date DESC LIMIT 50",
+            (patient_id,),
+        )
+        cols = [d[0] for d in cur.description]
+        rows = cur.fetchall()
+    return [dict(zip(cols, row)) for row in rows]
 
 
 @router.get("/{patient_id}")
@@ -109,7 +171,35 @@ async def fetch_patient(patient_id: str):
     try:
         if not get_patient(patient_id):
             return JSONResponse(status_code=404, content=err(f"Patient {patient_id!r} not found"))
-        return ok(serialize_complete_life_graph(patient_id))
+        lg = serialize_life_graph(patient_id)
+        pending_actions = get_pending_actions(patient_id)
+        action_history = _get_action_history(patient_id)
+        life_graph_json = {
+            "health": {
+                "medications": [
+                    {"name": m.get("name"), "dose": m.get("dosage"), "frequency": m.get("frequency")}
+                    for m in lg.get("medications", [])
+                ],
+            },
+            "appointments": [
+                {"date": a.get("next_scheduled"), "provider": a.get("provider"), "type": a.get("specialty")}
+                for a in lg.get("appointments", [])
+            ],
+            "grocery": lg.get("grocery", {}),
+            "financial": lg.get("financial", {}),
+            "emergency_contacts": lg.get("emergency_contacts", []),
+        }
+        return ok({
+            "patient_id": lg["patient_id"],
+            "name": lg["name"],
+            "age": lg.get("age"),
+            "address": lg.get("address"),
+            "preferences_json": lg.get("preferences", {}),
+            "life_graph_json": life_graph_json,
+            "assigned_caregivers": lg.get("assigned_caregivers", []),
+            "pending_actions": pending_actions,
+            "action_history": action_history,
+        })
     except Exception as exc:
         return JSONResponse(status_code=500, content=err(str(exc)))
 

@@ -179,7 +179,7 @@ class QuestionTask(Model):
     patient_id: str
     domain: str
     question: str
-    api_lookup_instruction: str
+    api_lookup_instruction: str = ""
 
 
 class QuestionApiResult(Model):

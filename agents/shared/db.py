@@ -60,6 +60,18 @@ def init_db(schema_path: str = SCHEMA_PATH) -> None:
 
 
 # Org helpers
+def get_setup_status() -> dict[str, Any]:
+    with get_connection() as conn:
+        org = conn.execute("SELECT org_name FROM org_profile LIMIT 1").fetchone()
+        cg_count = conn.execute("SELECT COUNT(*) as n FROM caregivers").fetchone()["n"]
+        pt_count = conn.execute("SELECT COUNT(*) as n FROM patients").fetchone()["n"]
+    return {
+        "org_configured": bool(org and org["org_name"]),
+        "caregiver_count": cg_count,
+        "patient_count": pt_count,
+    }
+
+
 def get_org_profile() -> dict[str, Any]:
     with get_connection() as conn:
         row = conn.execute(
@@ -604,13 +616,68 @@ def confirm_patient_update(update_id: int) -> None:
         conn.commit()
 
 
+def deactivate_medication(med_id: str) -> None:
+    with get_connection() as conn:
+        conn.execute("UPDATE medications SET active=0 WHERE med_id=?", (med_id,))
+        conn.commit()
+
+
+def deactivate_appointment(appt_id: str) -> None:
+    with get_connection() as conn:
+        conn.execute("UPDATE appointments SET active=0 WHERE appt_id=?", (appt_id,))
+        conn.commit()
+
+
+def deactivate_caregiver_note(note_id: int) -> None:
+    with get_connection() as conn:
+        conn.execute("UPDATE caregiver_notes SET active=0 WHERE id=?", (note_id,))
+        conn.commit()
+
+
+def deactivate_grocery_staple(staple_id: int) -> None:
+    with get_connection() as conn:
+        conn.execute("UPDATE grocery_staples SET active=0 WHERE id=?", (staple_id,))
+        conn.commit()
+
+
+def deactivate_financial_bill(bill_id: int) -> None:
+    with get_connection() as conn:
+        conn.execute("UPDATE financial_bills SET active=0 WHERE id=?", (bill_id,))
+        conn.commit()
+
+
+# financial_anomalies intentionally omitted: it is a history/audit table with no active column;
+# anomaly rows are never removed via the patient-update path.
+_SUBTABLE_DEACTIVATORS = {
+    "medications": ("med_id", deactivate_medication),
+    "appointments": ("appt_id", deactivate_appointment),
+    "caregiver_notes": ("id", deactivate_caregiver_note),
+    "grocery_staples": ("id", deactivate_grocery_staple),
+    "financial_bills": ("id", deactivate_financial_bill),
+}
+
+
 def apply_patient_update(update_id: int, changes: dict[str, Any]) -> None:
     update = get_patient_update(update_id)
     if not update:
         return
     patient_id = update["patient_id"]
     operation = update.get("operation")
-    if operation == "remove" or changes.get("active") == 0 or changes.get("remove") is True:
+    if operation == "remove":
+        for table, (pk_field, deactivate_fn) in _SUBTABLE_DEACTIVATORS.items():
+            for item in changes.get(table, []):
+                if item.get("active") == 0 or pk_field in item:
+                    pk_val = item.get(pk_field)
+                    if pk_val is not None:
+                        deactivate_fn(pk_val)
+        if not any(changes.get(t) for t in _SUBTABLE_DEACTIVATORS):
+            with get_connection() as conn:
+                conn.execute("UPDATE patients SET active=0 WHERE patient_id=?", (patient_id,))
+        with get_connection() as conn:
+            conn.execute("UPDATE patient_updates SET applied=1 WHERE id=?", (update_id,))
+            conn.commit()
+        return
+    if changes.get("active") == 0 or changes.get("remove") is True:
         with get_connection() as conn:
             conn.execute("UPDATE patients SET active=0 WHERE patient_id=?", (patient_id,))
             conn.execute("UPDATE patient_updates SET applied=1 WHERE id=?", (update_id,))
@@ -658,7 +725,7 @@ def write_action(action: dict[str, Any]) -> str:
                 caregiver_options_json, outcome, manual_action_type, api_payload,
                 recipient_email, recipient_type, email_subject, scheduling_status, last_modified_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
             ON CONFLICT(action_id) DO UPDATE SET
                 patient_id=excluded.patient_id,
                 domain=excluded.domain,
@@ -684,7 +751,7 @@ def write_action(action: dict[str, Any]) -> str:
                 recipient_type=excluded.recipient_type,
                 email_subject=excluded.email_subject,
                 scheduling_status=excluded.scheduling_status,
-                last_modified_at=datetime('now')
+                last_modified_at=strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
             """,
             (
                 action_id,
@@ -760,7 +827,7 @@ def get_overdue_actions() -> list[dict[str, Any]]:
             WHERE completed=0
               AND is_overdue=0
               AND review_by IS NOT NULL
-              AND review_by < datetime('now')
+              AND review_by < strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
             ORDER BY review_by ASC
             """
         ).fetchall()
@@ -795,7 +862,7 @@ def update_action(action_id: str, updates: dict[str, Any]) -> None:
     set_clause = ", ".join([f"{key}=?" for key in payload.keys()])
     with get_connection() as conn:
         conn.execute(
-            f"UPDATE action_history SET {set_clause}, last_modified_at=datetime('now') WHERE action_id=?",
+            f"UPDATE action_history SET {set_clause}, last_modified_at=strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE action_id=?",
             [*payload.values(), action_id],
         )
         conn.commit()
@@ -808,7 +875,7 @@ def replace_draft(action_id: str, new_draft: str) -> None:
             UPDATE action_history
             SET draft_content=?,
                 draft_version=COALESCE(draft_version, 1) + 1,
-                last_modified_at=datetime('now'),
+                last_modified_at=strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
                 modification_in_progress=0
             WHERE action_id=?
             """,
@@ -916,7 +983,7 @@ def log_expiration_notification(action_id: str, channel: str) -> None:
     with get_connection() as conn:
         conn.execute(
             "INSERT INTO expiration_notifications (action_id, notified_at, channel) VALUES (?, ?, ?)",
-            (action_id, datetime.utcnow().isoformat(), channel),
+            (action_id, datetime.utcnow().isoformat() + "Z", channel),
         )
         conn.commit()
 
@@ -1025,6 +1092,47 @@ def get_caregiver_available_slots(date: str, duration_hours: float = 2.0) -> lis
             (date,),
         ).fetchall()
     return _rows_to_dicts(rows)
+
+
+_DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+
+def create_caregiver(
+    name: str,
+    email: str,
+    phone: str,
+    role: str,
+    schedule: dict,  # {"Mon": {"start": "09:00", "end": "17:00"}, ...}
+) -> str:
+    import secrets
+    from datetime import date as _date, timedelta as _timedelta
+
+    caregiver_id = "cg_" + secrets.token_hex(3)
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT INTO caregivers (caregiver_id, name, email, phone, role) VALUES (?,?,?,?,?)",
+            (caregiver_id, name, email, phone, role),
+        )
+        today = _date.today()
+        for i in range(14):
+            target = today + _timedelta(days=i)
+            day_entry = schedule.get(_DAY_NAMES[target.weekday()])
+            conn.execute(
+                """
+                INSERT INTO caregiver_schedule
+                    (caregiver_id, date, start_time, end_time, available, booked)
+                VALUES (?, ?, ?, ?, ?, 0)
+                """,
+                (
+                    caregiver_id,
+                    target.isoformat(),
+                    day_entry["start"] if day_entry else None,
+                    day_entry["end"] if day_entry else None,
+                    1 if day_entry else 0,
+                ),
+            )
+        conn.commit()
+    return caregiver_id
 
 
 def book_caregiver_slot(caregiver_id: str, date: str) -> None:

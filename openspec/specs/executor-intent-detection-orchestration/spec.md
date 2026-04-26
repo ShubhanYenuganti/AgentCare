@@ -1,4 +1,10 @@
-## ADDED Requirements
+# Executor Intent Detection Orchestration
+
+## Purpose
+
+Defines the executor's intent classification, routing, fan-out detection, ASI:One mailbox boundary preservation, and soft-delete behavior for patient data operations.
+
+## Requirements
 
 ### Requirement: Intent-First Executor Routing
 The executor SHALL classify inbound requests into intent classes (`question`, `modification`, `scheduling`, `detection`) and route to the appropriate downstream handling path.
@@ -28,3 +34,10 @@ The executor MUST remain the sole ASI:One mailbox ingress/egress boundary while 
 #### Scenario: Chat request receives immediate acknowledgement and correlated final reply
 - **WHEN** an ASI:One `ChatMessage` is received through mailbox ingress
 - **THEN** the executor MUST send an immediate acknowledgement, run intent orchestration, and send a final correlated `ChatMessage` reply to the original sender address
+
+### Requirement: Soft-delete on patient data removal
+All removal operations on normalized life-graph tables (medications, appointments, grocery, grocery_staples, financial_bills, financial_anomalies, caregiver_notes) SHALL set `active=0` rather than issuing a DELETE, preserving history for audit and anomaly detection.
+
+#### Scenario: Medication removal soft-deleted
+- **WHEN** a `patient_update` operation removes a medication entry
+- **THEN** the medication row is updated to `active=0` and does not appear in subsequent life graph reads but remains in the DB

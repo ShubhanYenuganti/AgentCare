@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from agents.shared.api_capabilities import (
+    build_execution_plan_preview,
     build_post_request_body,
     infer_primary_route_for_action,
     resolve_route_and_params_from_action,
@@ -22,6 +23,7 @@ from agents.shared.db import (
     get_action,
     get_action_rankings,
     get_chat_history,
+    get_connection,
     get_pending_actions,
     update_action,
     write_chat_message,
@@ -62,9 +64,36 @@ class ActionModificationBody(BaseModel):
     urgency_level: str | None = None
 
 
+def _enrich_actions(actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not actions:
+        return actions
+    patient_ids = list({a["patient_id"] for a in actions if a.get("patient_id")})
+    if patient_ids:
+        placeholders = ",".join("?" * len(patient_ids))
+        with get_connection() as conn:
+            rows = conn.execute(
+                f"SELECT patient_id, name FROM patients WHERE patient_id IN ({placeholders})",
+                patient_ids,
+            ).fetchall()
+        name_map = {row[0]: row[1] for row in rows}
+    else:
+        name_map = {}
+    for a in actions:
+        a.setdefault("patient_name", name_map.get(a.get("patient_id")))
+        a.setdefault("is_overdue", a.get("is_overdue", 0))
+        a.setdefault("scheduling_status", a.get("scheduling_status"))
+        a["execution_plan"] = build_execution_plan_preview(a)
+    return actions
+
+
 @router.get("")
 async def list_actions(
-    sort: str = Query(default="rank", description="Sort order: 'rank' (urgency score) or 'created_at' (newest first)")
+    sort: str = Query(default="rank", description="Sort order: 'rank' (urgency score) or 'created_at' (newest first)"),
+    domain: str | None = Query(default=None),
+    urgency: str | None = Query(default=None),
+    type: str | None = Query(default=None),
+    patient_id: str | None = Query(default=None),
+    is_overdue: bool | None = Query(default=None),
 ):
     try:
         if sort == "created_at":
@@ -72,7 +101,20 @@ async def list_actions(
             actions.sort(key=lambda a: a.get("created_at") or "", reverse=True)
         else:
             actions = get_action_rankings()
-        return ok(actions)
+
+        if domain is not None:
+            actions = [a for a in actions if a.get("domain") == domain]
+        if urgency is not None:
+            actions = [a for a in actions if a.get("urgency_level") == urgency]
+        if type is not None:
+            actions = [a for a in actions if a.get("type") == type]
+        if patient_id is not None:
+            actions = [a for a in actions if a.get("patient_id") == patient_id]
+        if is_overdue is not None:
+            flag = 1 if is_overdue else 0
+            actions = [a for a in actions if a.get("is_overdue") == flag]
+
+        return ok(_enrich_actions(actions))
     except Exception as exc:
         return JSONResponse(status_code=500, content=err(str(exc)))
 
@@ -83,6 +125,7 @@ async def fetch_action(action_id: str):
         action = get_action(action_id)
         if not action:
             return JSONResponse(status_code=404, content=err(f"Action {action_id!r} not found"))
+        action["execution_plan"] = build_execution_plan_preview(action)
         return ok(action)
     except Exception as exc:
         return JSONResponse(status_code=500, content=err(str(exc)))
@@ -119,6 +162,22 @@ async def patch_action(action_id: str, body: ActionModificationBody):
 
         if updates:
             update_action(action_id, updates)
+
+        if body.modification_instruction is not None and EXECUTOR_INTERNAL_URL:
+            context_prefix = (
+                f"[Action context] action_id={action_id} "
+                f"patient_id={action.get('patient_id')} "
+                f"domain={action.get('domain')} "
+                f"type={action.get('type')}\n\n"
+            )
+            try:
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    await client.post(
+                        f"{EXECUTOR_INTERNAL_URL}/message",
+                        json={"content": context_prefix + body.modification_instruction, "action_id": action_id},
+                    )
+            except httpx.HTTPError:
+                pass  # DB write succeeded; agent delivery is best-effort
 
         updated = get_action(action_id)
         return ok(updated)

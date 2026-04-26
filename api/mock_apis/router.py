@@ -191,9 +191,11 @@ async def amazon_order(body: AmazonOrderRequest):
         datetime.strptime("18:00", "%H:%M").time(),
         tzinfo=timezone.utc,
     )
+    order_id = _confirmation("AMZ")
     return {
         "status": "cart_created",
-        "cart_id": _confirmation("AMZ"),
+        "order_id": order_id,
+        "cart_id": order_id,
         "estimated_delivery": delivery_dt.isoformat().replace("+00:00", "Z"),
         "total_estimate": round(max(9.99, len(body.items) * 7.5), 2),
         "items_confirmed": [f"{item} x1" for item in body.items],
@@ -204,6 +206,11 @@ async def amazon_order(body: AmazonOrderRequest):
 
 @router.post("/amazon/reorder")
 async def amazon_reorder_alias(body: AmazonOrderRequest):
+    return await amazon_order(body)
+
+
+@router.post("/grocery/order")
+async def grocery_order_alias(body: AmazonOrderRequest):
     return await amazon_order(body)
 
 

@@ -1,0 +1,48 @@
+# TARGET: patient_id=pt_002 | POST /patients/pt_002/update/file
+# EXPECTED DOMAIN: financial
+# EXPECTED ACTION: Utility bill anomaly review — $340 vs historical $85-100, tier_1 urgency
+
+===================================
+CAREGIVER BILL REVIEW NOTE
+===================================
+
+Date: April 25, 2026
+Caregiver: Linda Park
+Patient: Robert Harris (pt_002)
+Visit time: 8:00 AM – 9:30 AM
+
+---
+BILL REVIEW: PG&E UTILITY — APRIL 2026
+---
+
+During today's visit, Mr. Harris mentioned he had received an unusually large utility bill and was concerned. Carol Harris (his wife) retrieved the bill from the kitchen counter.
+
+BILL DETAILS:
+  Utility provider: Pacific Gas & Electric (PG&E)
+  Account holder: Robert J. Harris
+  Account number: 8241-0093-7721
+  Billing period: March 13, 2026 – April 14, 2026 (32 days)
+  Current charges: $340.12
+  Autopay date: April 28, 2026
+
+PRIOR BILLING HISTORY (from statements on file):
+  January 2026: $91.50
+  February 2026: $97.20
+  March 2026: $88.75
+  December 2025: $103.40
+  Average (last 4 months): ~$95.21
+
+ANOMALY SUMMARY:
+This month's bill of $340.12 is approximately 3.6x the historical average. Mr. Harris confirmed he has not changed any appliances recently, made no home repairs involving electrical work, and did not run air conditioning (April in Oakland). The house has been unmodified.
+
+POTENTIAL EXPLANATIONS (per client):
+  - "We've been home more but not doing anything different"
+  - No new appliances purchased
+  - No guests staying for extended periods
+
+Robert asked whether autopay should be paused while this is investigated. He is worried about financial impact given his fixed income.
+
+RECOMMENDATION:
+This bill warrants review before the April 28 autopay date. A care coordinator should contact PG&E to request a billing investigation and potentially pause autopay on this account pending resolution.
+
+Caregiver signature: Linda Park

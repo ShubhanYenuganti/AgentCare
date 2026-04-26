@@ -71,78 +71,102 @@ macos/
 └── README.md
 ```
 
-### Current Sprint 1 Structure (implemented in this repo)
+### Current Structure (fully implemented)
 ```text
 agents/
-  shared/{config.py,constants.py,db.py,llm.py,models.py,state_service.py}
-  executor/agent.py
-  {health,appointment,grocery,financial}/{supervisor.py,worker.py}
-  scheduling/agent.py
+  shared/{config.py,constants.py,db.py,llm.py,models.py,state_service.py,notifications.py}
+  executor/agent.py          # Intent routing, fan-out, expiration loop
+  {health,appointment,grocery,financial}/{supervisor.py,worker.py,openfda.py}
+  scheduling/agent.py        # Scheduling query/selection state machine
   run_all.py
 api/
   main.py
   routers/{actions.py,patients.py,caregivers.py,scheduling.py,notifications.py,ingest.py,org.py}
-  mock_apis/__init__.py
+  mock_apis/                 # CVS, calendar, Instacart, Amazon, caregiver mock endpoints
 dashboard/
   index.html
   vite.config.ts
-  tailwind.config.ts
-  src/{main.tsx,App.tsx}
+  playwright.config.ts
+  src/
+    main.tsx                 # Redux Provider, lazy-loaded routes
+    components/
+      AppShell.tsx           # TopBar + NavTabs
+      ActionCard.tsx         # Polymorphic card (health-modify, Q&A, scheduling)
+      ActionChatPanel.tsx    # Slide-over chat drawer with 3s polling
+      DraftModal.tsx         # Inline draft edit + PATCH submission
+    views/
+      ActionFeed.tsx         # 10s polling, urgency-sorted action cards
+      PatientRoster.tsx      # Split layout, add/update workflows, staged confirmation
+      CaregiverManagement.tsx# Scheduling strip, 14-day grid, confirm/decline
+      OrgDashboard.tsx       # Org summary, protocol cards, metrics, edit form
+    api/client.ts            # RTK Query API slice (all endpoints)
+    types/index.ts           # Shared TypeScript interfaces
+  e2e/                       # Playwright E2E tests for all four views
 data/
   schema.sql
   seed.py
   life_graph.db (generated)
+tests/
+  integration/               # FastAPI integration tests (patient update, ingest, detect)
+  test_health_detection.py
+  test_appointment_detection.py
+  test_grocery_detection.py
+  test_financial_detection.py
+  test_scheduling_e2e.py
+  test_expiration_loop.py
+docs/
+  architecture.md
+  demo-checklist.md
 ```
 
-## Full Implementation Target (Spec v7)
-The full build defined in `MACOS_build_spec_v7_final.md` is an 11-sprint implementation:
+## What Is Implemented
 
-1. Sprint 1: Foundation scaffold, schema, shared runtime contracts, deterministic seed, baseline agent topology, baseline dashboard routes.
-2. Sprint 2: Mock external API routers, ingest pipelines (text/file), org endpoints, internal detect trigger, email integration.
-3. Sprint 3: Health domain production logic (detection, risk scoring, modification pipeline, Q&A, live API checks).
-4. Sprint 4: Appointment, grocery, and financial production logic with full detection + Q&A coverage.
-5. Sprint 5: Full executor orchestration, expiration loop behavior, intent routing, patient-update workflows, and complete FastAPI router wiring.
-6. Sprint 6: Scheduling agent query/selection flow with task state transitions.
-7. Sprint 7: Dashboard View 1 (Action Feed) with action states, chat panel, modification UX, and urgency/overdue visualization.
-8. Sprint 8: Dashboard View 2 (Patient Roster) with patient detail panels, update workflow UI, and update-history integration.
-9. Sprint 9: Dashboard View 3 (Caregiver Management) with scheduling panel, assignment workflows, and 14-day schedule grid.
-10. Sprint 10: Dashboard View 4 (Org Dashboard) with org summary, protocol panels, caregiver roster, and org metrics.
-11. Sprint 11: End-to-end polish, full demo validation, README + demo artifacts, and submission packaging.
+### Backend
+- Full multi-agent stack: Executor → Domain Supervisors → Workers (health, appointment, grocery, financial, scheduling).
+- Event-driven patient detection fan-out on `patient_create` and `patient_update` triggers.
+- Scheduling agent: query → options → numeric selection → `pending_approval → unconfirmed → confirmed/declined` lifecycle.
+- Expiration loop: marks overdue actions, emits deduped notifications per channel (dashboard, ASI:One).
+- Patient ingest: text and file (PDF/image) → LLM extraction → write patient → trigger detect.
+- Patient update: staged confirmation state machine → confirm → trigger detect with domain hint.
+- Full FastAPI REST surface: patients, actions, caregivers, scheduling, notifications, ingest, org.
 
-Core system behavior in the final target:
-- 3-tier agent orchestration (Executor -> Supervisors -> Workers).
-- Event-driven detection for patient changes (no supervisor interval loops).
-- Single scheduled expiration loop on the Executor.
-- SQLite-backed life graph and action/notification audit surface.
-- ASI:One + dashboard pathways for caregiver interaction.
+### API Contract
+All endpoints return `{"success": true, "data": ...}` or `{"success": false, "error": "..."}`.
 
-## What Is Currently Implemented (Sprint 1)
-Implemented now:
-- Repository scaffold for `agents/`, `api/`, `dashboard/`, and `data/`.
-- Quickstarter-style multi-agent mock topology:
-  - Executor orchestrator.
-  - Domain supervisors/workers for health, appointment, grocery, financial.
-  - Scheduling agent.
-- Shared runtime modules:
-  - `agents/shared/models.py` message contracts.
-  - `agents/shared/constants.py` runtime constants.
-  - `agents/shared/db.py` DB helper surface.
-  - `agents/shared/llm.py` LLM wrapper utilities.
-  - `agents/shared/config.py` startup config validation + local-first resolver.
-- SQLite schema and deterministic seed data:
-  - 1 `org_profile` row.
-  - 3 patients.
-  - 10 caregivers.
-  - 140 schedule rows (14 days x 10 caregivers).
-  - 1 seeded overdue action.
-- API scaffold with mounted routers and health endpoint (`GET /health`).
-- React dashboard scaffold with baseline 4 routes and placeholders.
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/actions?sort=rank` | List pending actions sorted by urgency score |
+| PATCH | `/actions/{id}` | Submit modification instruction or mark reviewed |
+| POST | `/actions/{id}/chat` | Send chat message to assistant |
+| GET | `/actions/{id}/chat-history` | Fetch chat history |
+| GET | `/patients` | Enriched patient list (pending counts, urgency) |
+| GET | `/patients/{id}` | Full patient detail with life graph |
+| POST | `/patients/{id}/update` | Propose update (staged) |
+| POST | `/patients/{id}/update/{uid}/confirm` | Confirm staged update |
+| GET | `/patients/{id}/update-history` | Update history log |
+| POST | `/ingest/text` | Ingest free-form patient text |
+| POST | `/ingest/file` | Ingest PDF or image file |
+| GET | `/caregivers` | List caregivers with availability |
+| GET | `/caregivers/{id}/schedule` | 14-day schedule grid |
+| GET | `/caregivers/{id}/assignments` | Assignment list |
+| POST | `/scheduling/{id}/assign` | Assign caregiver → unconfirmed |
+| POST | `/scheduling/{id}/confirm` | Confirm → completed=1 |
+| POST | `/scheduling/{id}/decline` | Decline → reset to pending_approval |
+| GET | `/org` | Org profile |
+| PUT | `/org` | Update org profile |
 
-Not implemented yet (Sprint 2+ scope):
-- Production detection pipelines and live-domain business logic.
-- Mock external API endpoints under `api/mock_apis/`.
-- Fully wired CRUD/action APIs backed by live runtime behavior.
-- Full four-view dashboard implementation and domain UX flows.
+### Dashboard (four views)
+- **Action Feed**: RTK Query polling (10s), urgency-sorted cards, OVERDUE banners, tier badges, `ActionChatPanel` slide-over (3s chat poll), `DraftModal` with idempotency key, modification-in-progress lock, scheduling deep-link.
+- **Patient Roster**: Two-column split layout, sidebar with urgency pills, life graph sections (health/appointments/grocery/financial/emergency contacts), pending actions summary, action history accordion, Add Patient modal (text + file tabs), staged update confirmation state machine, Update History tab.
+- **Caregiver Management**: Scheduling strip (pending_approval + unconfirmed actions), assignment dropdowns, Confirm/Decline buttons, caregiver detail panel, 14-day schedule grid, assignment list, deep-link preselect from Action Feed.
+- **Org Dashboard**: Org summary panel, four metric cards (total pending, total overdue, 30-day completion rate, avg urgency score), protocol cards, caregiver roster table, Edit Org Profile form.
+
+### Test Coverage
+- Backend integration tests: patient update pipeline, file ingest, executor fan-out logic.
+- Domain detection unit tests: health, appointment, grocery, financial — parse pipeline with deterministic seed data.
+- Scheduling E2E tests: assign → unconfirmed → confirm/decline status transitions.
+- Expiration loop tests: dedup notification per channel, overdue marking.
+- Dashboard E2E tests (Playwright): all four views, critical UX flows.
 
 ## Run Instructions (Sprint 1 Operations)
 

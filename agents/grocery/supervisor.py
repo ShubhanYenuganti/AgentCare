@@ -20,7 +20,9 @@ import json
 
 from agents.shared.db import replace_draft, serialize_life_graph, set_modification_in_progress, write_action
 from agents.shared.life_graph_parser import parse_life_graph_for_domain
+from agents.shared.supervisor_utils import _risk_score_drafts
 from agents.shared.models import (
+    ActionDraft,
     MockDomainTask,
     MockSupervisorResult,
     MockWorkerResult,
@@ -326,6 +328,17 @@ async def handle_worker_result(
             result.pass_id, _DOMAIN, sorted(dropped_action_ids),
         )
 
+    original_request = _pending_detection_worker_request.get(result.pass_id)
+    org_context = (original_request.org_context if original_request else None) or {}
+    if drafts_to_persist:
+        try:
+            draft_dicts = [d.dict() for d in drafts_to_persist]
+            scored = _risk_score_drafts(draft_dicts, {}, org_context)
+            drafts_to_persist = [ActionDraft(**d) for d in scored]
+            ctx.logger.info("[RISK-SCORE] pass_id=%s scored %d drafts", result.pass_id, len(drafts_to_persist))
+        except Exception as exc:
+            ctx.logger.error("[RISK-SCORE] pass_id=%s failed: %s", result.pass_id, exc)
+
     for i, draft in enumerate(drafts_to_persist):
         ctx.logger.info(
             "[DRAFT] %d/%d action_id=%s type=%s urgency=%s review_by=%s desc=%r",
@@ -373,48 +386,17 @@ async def handle_worker_result(
 async def handle_modification_request(
     ctx: Context, sender: str, msg: ModificationRequest
 ) -> None:
-    if msg.domain != _DOMAIN:
-        ctx.logger.warning(
-            "[RECV][IGNORE] ModificationRequest action_id=%s domain=%s expected=%s sender=…%s",
-            msg.action_id, msg.domain, _DOMAIN, _short(sender),
-        )
-        return
-
     ctx.logger.info(
-        "[RECV] ModificationRequest action_id=%s patient_id=%s action_type=%s "
-        "instruction=%r sender=…%s | %s",
-        msg.action_id, msg.patient_id, msg.action_type,
-        _trunc(msg.modification_instruction, 100), _short(sender), _state_summary(),
+        "[RECV] ModificationRequest action_id=%s domain=%s — not supported for this domain",
+        msg.action_id, msg.domain,
     )
-
-    try:
-        set_modification_in_progress(msg.action_id, True)
-        ctx.logger.info("[DB] set_modification_in_progress action_id=%s — ok", msg.action_id)
-    except Exception as exc:
-        ctx.logger.error("[DB] set_modification_in_progress action_id=%s — FAILED: %s",
-                         msg.action_id, exc)
-
-    _pending_executor_modification[msg.action_id] = sender
-    ctx.logger.info(
-        "[STATE] Registered modification action_id=%s executor=…%s | %s",
-        msg.action_id, _short(sender), _state_summary(),
-    )
-
-    task = ModificationTask(
+    result = ModificationResult(
         action_id=msg.action_id,
-        patient_id=msg.patient_id,
-        domain=msg.domain,
-        action_type=msg.action_type,
-        current_draft=msg.current_draft,
-        modification_instruction=msg.modification_instruction,
-        requires_live_api=False,
-        api_context=None,
+        patient_id=msg.patient_id if hasattr(msg, "patient_id") else "",
+        revised_draft="not_supported",
+        changes_summary="Modification not supported for this domain",
     )
-    ctx.logger.info(
-        "[ROUTE] ModificationTask action_id=%s patient_id=%s -> grocery-worker …%s",
-        msg.action_id, msg.patient_id, _short(GROCERY_WORKER_ADDRESS),
-    )
-    await ctx.send(GROCERY_WORKER_ADDRESS, task)
+    await ctx.send(sender, result)
 
 
 @supervisor.on_message(ModificationDraft)
@@ -481,6 +463,11 @@ async def handle_question_request(
         "[STATE] Registered question action_id=%s executor=…%s | %s",
         msg.action_id, _short(sender), _state_summary(),
     )
+
+    _FRESHNESS_KEYWORDS = {"current", "latest", "today", "now", "recent", "live", "updated", "status"}
+
+    def _needs_live_api(question: str) -> bool:
+        return any(kw in question.lower() for kw in _FRESHNESS_KEYWORDS)
 
     # Fetch live patient data from the database
     patient_context = "{}"

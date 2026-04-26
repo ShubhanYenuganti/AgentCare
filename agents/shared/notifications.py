@@ -2,6 +2,11 @@
 
 RESEND_API_KEY must be set in .env for live email delivery.
 When absent, notifications are recorded in the DB but not sent externally.
+
+RESEND_TO_OVERRIDE — optional env var. When set, ALL outbound Resend emails
+are delivered to this address instead of the action's recipient_email. Defaults
+to "yrshubhan@gmail.com" so test/demo sends never reach real external recipients.
+Clear this var (RESEND_TO_OVERRIDE="") to deliver to the actual recipient.
 """
 
 from __future__ import annotations
@@ -55,6 +60,24 @@ def build_action_subject(action: dict[str, Any], patient_name: str | None = None
     return template.format(patient=patient)
 
 
+_DEFAULT_TO_OVERRIDE = "yrshubhan@gmail.com"
+
+
+def _resolve_to(to: str | list[str]) -> list[str]:
+    """
+    Apply RESEND_TO_OVERRIDE if set (default: yrshubhan@gmail.com).
+
+    The override replaces whatever recipient_email the action contains so that
+    all approve-path emails go to a single inbox during development/demo. Set
+    RESEND_TO_OVERRIDE="" in the environment to disable and send to the real
+    recipient.
+    """
+    override = os.getenv("RESEND_TO_OVERRIDE", _DEFAULT_TO_OVERRIDE).strip()
+    if override:
+        return [override]
+    return [to] if isinstance(to, str) else list(to)
+
+
 def send_email(
     to: str | list[str],
     subject: str,
@@ -64,6 +87,7 @@ def send_email(
     """
     Send an email via Resend.
 
+    The ``to`` address is subject to RESEND_TO_OVERRIDE (default: yrshubhan@gmail.com).
     Returns a result dict with ``sent=True/False`` and optional ``id`` or ``error``.
     """
     client = _resend_client()
@@ -75,18 +99,25 @@ def send_email(
         )
         return {"sent": False, "error": "RESEND_API_KEY not configured"}
 
+    resolved_to = _resolve_to(to)
     try:
         params = {
             "from": from_addr,
-            "to": [to] if isinstance(to, str) else to,
+            "to": resolved_to,
             "subject": subject,
             "html": html_body,
         }
         result = client.Emails.send(params)
-        logger.info("Email sent id=%s to=%s subject=%r", result.get("id"), to, subject)
+        logger.info(
+            "Email sent id=%s to=%s (original=%s) subject=%r",
+            result.get("id"),
+            resolved_to,
+            to,
+            subject,
+        )
         return {"sent": True, "id": result.get("id")}
     except Exception as exc:
-        logger.error("Email send failed to=%s: %s", to, exc)
+        logger.error("Email send failed to=%s: %s", resolved_to, exc)
         return {"sent": False, "error": str(exc)}
 
 

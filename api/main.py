@@ -5,15 +5,30 @@ from __future__ import annotations
 import json
 import os
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.mock_apis import router as mock_router
 from api.routers import actions, caregivers, ingest, notifications, org, patients, scheduling
+from agents.shared.db import init_db
 
 app = FastAPI(title="MACOS API Scaffold")
 
-_cors_origins = json.loads(os.getenv("CORS_ORIGINS", '["*"]'))
+
+@app.on_event("startup")
+async def startup():
+    init_db()
+
+_dashboard_origin = os.getenv("DASHBOARD_ORIGIN", "http://localhost:5173")
+_cors_origins_env = os.getenv("CORS_ORIGINS", "")
+if _cors_origins_env:
+    _cors_origins = json.loads(_cors_origins_env)
+else:
+    _cors_origins = [_dashboard_origin]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,

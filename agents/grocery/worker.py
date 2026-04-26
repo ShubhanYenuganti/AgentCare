@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
-from datetime import datetime, timedelta, timezone
+import os
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 
+import httpx
 from uagents import Agent, Context
+
+from agents.shared.db import serialize_life_graph
 
 from agents.shared.api_capabilities import worker_api_capability_block
 from agents.shared.config import GROCERY_WORKER_SEED, LocalFirstResolver
@@ -36,6 +41,8 @@ worker = Agent(
 )
 
 _DOMAIN = "grocery"
+_MOCK_API_BASE = os.getenv("MOCK_API_BASE", "http://localhost:8000").rstrip("/")
+_MOCK_TIMEOUT_SECONDS = 8.0
 
 _DETECTION_BASE_PROMPT = """You are a grocery care specialist for a home-care organisation.
 
@@ -87,6 +94,111 @@ _QUESTION_BASE_PROMPT = (
     "Use the provided action context to give a clear, evidence-based answer. "
     "Return only the answer text — no commentary."
 )
+
+
+def _trigger_grocery_order(patient_id: str) -> dict | None:
+    """Sync HTTP call to mock grocery order API. Returns response dict or None on failure."""
+    url = f"{_MOCK_API_BASE}/mock/grocery/order"
+    try:
+        with httpx.Client(timeout=_MOCK_TIMEOUT_SECONDS) as client:
+            resp = client.post(url, json={"patient_id": patient_id})
+            resp.raise_for_status()
+            return resp.json()
+    except Exception:
+        return None
+
+
+def _run_grocery_rule_checks(life_graph: dict, patient_id: str) -> list[dict]:
+    items: list[dict] = []
+    today = datetime.now(timezone.utc).date()
+
+    # Rule 1: Delivery staleness (7-day)
+    grocery = life_graph.get("grocery") or {}
+    last_delivery_str = grocery.get("last_delivery")
+    if last_delivery_str:
+        try:
+            last_delivery = date.fromisoformat(last_delivery_str)
+            days_since = (today - last_delivery).days
+            if days_since >= 7:
+                order_resp = _trigger_grocery_order(patient_id)
+                if order_resp:
+                    order_id = order_resp.get("order_id", "N/A")
+                    status = order_resp.get("status", "N/A")
+                    est_delivery = order_resp.get("estimated_delivery", "N/A")
+                    description = (
+                        f"Grocery delivery overdue ({days_since} days since last delivery). "
+                        f"Order placed: {order_id}, status: {status}, est. delivery: {est_delivery}."
+                    )
+                else:
+                    description = (
+                        f"Grocery delivery overdue ({days_since} days since last delivery on {last_delivery_str}). "
+                        "Please arrange a new delivery."
+                    )
+                items.append({
+                    "type": "grocery_reorder",
+                    "urgency": "tier_2",
+                    "description": description,
+                    "draft_content": description,
+                })
+        except ValueError:
+            pass
+
+    # Rule 2: Dietary conflict
+    dietary_raw = grocery.get("dietary_restrictions_json") or "[]"
+    restrictions = json.loads(dietary_raw) if isinstance(dietary_raw, str) else dietary_raw
+    restriction_keywords = [
+        r.lower() if isinstance(r, str) else r.get("restriction", "").lower()
+        for r in restrictions
+    ]
+    for staple in life_graph.get("grocery_staples", []):
+        if not staple.get("active", 1):
+            continue
+        item_name = staple.get("item", "").lower()
+        for kw in restriction_keywords:
+            if kw and kw in item_name:
+                items.append({
+                    "type": "dietary_conflict_alert",
+                    "urgency": "tier_1",
+                    "description": (
+                        f"Staple item '{staple.get('item')}' conflicts with dietary restriction '{kw}'"
+                    ),
+                    "draft_content": (
+                        f"Patient {patient_id} has '{staple.get('item')}' as a grocery staple, "
+                        f"but this conflicts with the dietary restriction '{kw}'. "
+                        "Please remove or substitute this item immediately."
+                    ),
+                })
+                break  # one alert per staple is enough
+
+    # Rule 3: Supply reorder
+    for staple in life_graph.get("grocery_staples", []):
+        if not staple.get("active", 1):
+            continue
+        last_ordered_str = staple.get("last_ordered")
+        freq = staple.get("frequency_days", 0)
+        if not last_ordered_str or not freq:
+            continue
+        try:
+            last_ordered = date.fromisoformat(last_ordered_str)
+            days_since = (today - last_ordered).days
+            if days_since >= freq:
+                items.append({
+                    "type": "supply_reorder",
+                    "urgency": "tier_3",
+                    "description": (
+                        f"Staple '{staple.get('item')}' is due for reorder "
+                        f"({days_since} days since last order, frequency: every {freq} days)"
+                    ),
+                    "draft_content": (
+                        f"Patient {patient_id}'s staple item '{staple.get('item')}' "
+                        f"was last ordered {days_since} days ago and is due for reorder "
+                        f"(reorder frequency: every {freq} days)."
+                    ),
+                })
+        except ValueError:
+            pass
+
+    return items
 
 
 def _short(addr: str) -> str:
@@ -212,6 +324,33 @@ async def handle_detection(
         _DOMAIN, msg.patient_id, msg.trigger, _trunc(system, 120),
     )
 
+    rule_drafts: list[ActionDraft] = []
+    try:
+        life_graph = await asyncio.to_thread(serialize_life_graph, msg.patient_id)
+        if life_graph:
+            rule_items = await asyncio.to_thread(_run_grocery_rule_checks, life_graph, msg.patient_id)
+            rule_drafts = [
+                ActionDraft(
+                    action_id=f"rule_{uuid4().hex[:12]}",
+                    patient_id=msg.patient_id,
+                    domain=_DOMAIN,
+                    type=item["type"],
+                    description=item["description"],
+                    draft_content=item.get("draft_content"),
+                    urgency_level=item["urgency"],
+                    review_by=(datetime.now(timezone.utc) + timedelta(hours=48)).isoformat(),
+                    manual_action_type=None,
+                    api_payload=None,
+                    recipient_email=None,
+                    recipient_type=None,
+                    email_subject=None,
+                )
+                for item in rule_items
+            ]
+            ctx.logger.info("[RULE-CHECK] pass_id=%s rule_drafts=%d", msg.pass_id, len(rule_drafts))
+    except Exception as exc:
+        ctx.logger.error("[RULE-CHECK] Failed pass_id=%s: %s", msg.pass_id, exc)
+
     drafts: list[ActionDraft] = []
     try:
         raw = call_claude_json(system, user_prompt, max_tokens=2000)
@@ -240,20 +379,28 @@ async def handle_detection(
                 i + 1, len(drafts), d.action_id, d.type, d.urgency_level,
                 _trunc(d.description, 80),
             )
+        # Merge: rule drafts first, then LLM drafts for new types
+        seen_types = {d.type for d in rule_drafts}
+        merged = list(rule_drafts)
+        for d in drafts:
+            if d.type not in seen_types:
+                merged.append(d)
+                seen_types.add(d.type)
+        drafts = merged if merged else [_stub_draft(msg.patient_id)]
     except RuntimeError as exc:
         ctx.logger.warning(
             "[LLM-FAIL] LLM unavailable for detection patient_id=%s pass_id=%s: %s "
             "— returning stub draft",
             msg.patient_id, msg.pass_id, exc,
         )
-        drafts = [_stub_draft(msg.patient_id)]
+        drafts = rule_drafts if rule_drafts else [_stub_draft(msg.patient_id)]
     except Exception as exc:
         ctx.logger.error(
             "[LLM-FAIL] Unexpected error during detection patient_id=%s pass_id=%s: %s "
             "— returning stub draft",
             msg.patient_id, msg.pass_id, exc,
         )
-        drafts = [_stub_draft(msg.patient_id)]
+        drafts = rule_drafts if rule_drafts else [_stub_draft(msg.patient_id)]
 
     if not drafts:
         drafts = [_stub_draft(msg.patient_id)]

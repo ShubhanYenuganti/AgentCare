@@ -2,18 +2,21 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 
 import httpx
 from uagents import Agent, Context
 
+from agents.health.openfda import check_drug_interactions, check_drug_recall
 from agents.shared.api_capabilities import worker_api_capability_block
 from agents.shared.config import HEALTH_WORKER_SEED, LocalFirstResolver
 from agents.shared.constants import AGENT_PORTS, MODIFICATION_MAX_TOKENS, QA_MAX_TOKENS
+from agents.shared.db import serialize_life_graph
 from agents.shared.llm import build_system_prompt, call_claude, call_claude_json
 from agents.shared.models import (
     ActionDraft,
@@ -83,7 +86,7 @@ _DETECTION_USER_TEMPLATE = (
     "(doctor_email, pharmacy_email, or assigned caregiver emails).\n"
     "If no known recipient exists, keep recipient_email/recipient_type/email_subject null.\n\n"
     "Example format:\n"
-    '[{{"type": "refill", "description": "...", "draft_content": "...", '
+    '[{{"type": "medication_refill", "description": "...", "draft_content": "...", '
     '"urgency_level": "tier_2", "manual_action_type": "cvs_refill", '
     '"api_payload": {{"template_version": "v1", "call": {{"route_key": "POST /mock/cvs/refill", "provider": "mock", '
     '"parameters": {{"medication": {{"value": "Lisinopril 10mg"}}, "patient_id": {{"value": "pt_001"}}, "pharmacy": {{"value": "CVS Mission St"}} }} }} }}, '
@@ -179,6 +182,135 @@ def _parse_detection_response(raw: list | dict, patient_id: str) -> list[ActionD
             )
         )
     return drafts or [_stub_draft(patient_id)]
+
+
+# ---------------------------------------------------------------------------
+# Rule-based detection (deterministic, runs before LLM pass)
+# ---------------------------------------------------------------------------
+
+
+def _run_health_rule_checks(life_graph: dict, patient_id: str) -> list[dict]:
+    """Return a list of ActionDraft-compatible dicts from deterministic rule checks."""
+    results: list[dict] = []
+    today = datetime.now(timezone.utc).date()
+
+    # Rule 1: Refill due within 7-day window
+    for med in life_graph.get("medications", []):
+        if not med.get("active", 1):
+            continue
+        refill_due_str = med.get("refill_due")
+        if not refill_due_str:
+            continue
+        try:
+            refill_date = date.fromisoformat(refill_due_str)
+        except ValueError:
+            continue
+        days_until = (refill_date - today).days
+        if 0 <= days_until <= 7:
+            urgency = "tier_1" if days_until <= 2 else "tier_2"
+            med_name = med.get("name", "unknown medication")
+            results.append({
+                "type": "medication_refill",
+                "description": f"Refill due in {days_until} day(s) for {med_name}",
+                "draft_content": (
+                    f"Medication refill needed: {med_name} (dosage: {med.get('dosage', 'N/A')}) "
+                    f"is due for refill on {refill_due_str}. "
+                    f"Please contact {med.get('pharmacy', 'pharmacy')} to arrange refill."
+                ),
+                "urgency_level": urgency,
+                "review_by": (datetime.now(timezone.utc) + timedelta(hours=24 if urgency == "tier_1" else 48)).isoformat(),
+                "manual_action_type": "cvs_refill",
+                "api_payload": None,
+                "recipient_email": None,
+                "recipient_type": "pharmacy",
+                "email_subject": f"Refill request: {med_name} for patient {patient_id}",
+            })
+
+    # Rule 2: Missed dose with worsening note in 48h window
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=48)
+    worsening_keywords = ["worse", "worsening", "declined", "deteriorated", "pain", "severe"]
+    for med in life_graph.get("medications", []):
+        adherence_raw = med.get("adherence_log_json") or "[]"
+        try:
+            log = json.loads(adherence_raw) if isinstance(adherence_raw, str) else adherence_raw
+        except Exception:
+            log = []
+        for entry in log:
+            if not entry.get("taken") and entry.get("note"):
+                note_lower = entry.get("note", "").lower()
+                if any(kw in note_lower for kw in worsening_keywords):
+                    med_name = med.get("name", "unknown medication")
+                    results.append({
+                        "type": "missed_dose_followup",
+                        "description": f"Missed dose with worsening note for {med_name}: {entry.get('note', '')}",
+                        "draft_content": (
+                            f"Alert: Patient missed dose of {med_name} on {entry.get('date', 'unknown date')} "
+                            f"with worsening symptom note: \"{entry.get('note', '')}\". "
+                            f"Immediate caregiver review recommended."
+                        ),
+                        "urgency_level": "tier_1",
+                        "review_by": (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat(),
+                        "manual_action_type": None,
+                        "api_payload": None,
+                        "recipient_email": None,
+                        "recipient_type": "caregiver",
+                        "email_subject": f"Urgent: Missed dose alert for patient {patient_id}",
+                    })
+                    break  # one alert per medication
+
+    # Rule 3: OpenFDA drug interaction check
+    drug_names = [
+        m.get("name")
+        for m in life_graph.get("medications", [])
+        if m.get("active", 1) and m.get("name")
+    ]
+    if len(drug_names) >= 2:
+        interaction_result = check_drug_interactions(drug_names)
+        if interaction_result.get("status") == "interaction_found":
+            results.append({
+                "type": "drug_interaction_alert",
+                "description": f"Potential drug interaction detected among: {', '.join(drug_names)}",
+                "draft_content": (
+                    f"OpenFDA lookup detected a potential interaction among patient's active medications: "
+                    f"{', '.join(drug_names)}. Prescriber review required."
+                ),
+                "urgency_level": "tier_1",
+                "review_by": (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat(),
+                "manual_action_type": None,
+                "api_payload": None,
+                "recipient_email": None,
+                "recipient_type": "prescriber",
+                "email_subject": f"Drug interaction alert for patient {patient_id}",
+            })
+
+    # Rule 4: OpenFDA recall check
+    for med in life_graph.get("medications", []):
+        if not med.get("active", 1):
+            continue
+        name = med.get("name")
+        if not name:
+            continue
+        recall = check_drug_recall(name)
+        if recall:
+            results.append({
+                "type": "drug_recall_alert",
+                "description": f"Active recall found for medication: {name}",
+                "draft_content": (
+                    f"OpenFDA recall alert: {name} has an active recall. "
+                    f"Recall details: {recall.get('recall_initiation_date', 'N/A')} — "
+                    f"{recall.get('reason_for_recall', 'See FDA enforcement report')}. "
+                    f"Contact prescriber immediately."
+                ),
+                "urgency_level": "tier_1",
+                "review_by": (datetime.now(timezone.utc) + timedelta(hours=12)).isoformat(),
+                "manual_action_type": None,
+                "api_payload": None,
+                "recipient_email": None,
+                "recipient_type": "prescriber",
+                "email_subject": f"Drug recall alert: {name} for patient {patient_id}",
+            })
+
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -290,6 +422,31 @@ async def handle_detection_request(
         _trunc(system_prompt, 120),
     )
 
+    # Fetch full life graph for rule checks (domain_patient_context omits medications)
+    rule_drafts: list[ActionDraft] = []
+    try:
+        life_graph = await asyncio.to_thread(serialize_life_graph, msg.patient_id)
+        if life_graph:
+            rule_items = _run_health_rule_checks(life_graph, msg.patient_id)
+            rule_drafts = [ActionDraft(
+                action_id=f"rule_{uuid4().hex[:12]}",
+                patient_id=msg.patient_id,
+                domain=_DOMAIN,
+                type=item["type"],
+                description=item["description"],
+                draft_content=item.get("draft_content"),
+                urgency_level=item.get("urgency_level", "tier_2"),
+                review_by=item.get("review_by", (datetime.now(timezone.utc) + timedelta(hours=48)).isoformat()),
+                manual_action_type=item.get("manual_action_type"),
+                api_payload=item.get("api_payload"),
+                recipient_email=item.get("recipient_email"),
+                recipient_type=item.get("recipient_type"),
+                email_subject=item.get("email_subject"),
+            ) for item in rule_items]
+            ctx.logger.info("[RULE-CHECK] pass_id=%s rule_drafts=%d", msg.pass_id, len(rule_drafts))
+    except Exception as exc:
+        ctx.logger.error("[RULE-CHECK] Failed pass_id=%s: %s", msg.pass_id, exc)
+
     drafts: list[ActionDraft] = []
     try:
         raw = call_claude_json(system_prompt, user_prompt, max_tokens=2000)
@@ -303,6 +460,14 @@ async def handle_detection_request(
             raw_len,
         )
         drafts = _parse_detection_response(raw, msg.patient_id)
+        # Merge: rule drafts take priority; dedupe by type
+        seen_types = {d.type for d in rule_drafts}
+        merged = list(rule_drafts)
+        for d in drafts:
+            if d.type not in seen_types:
+                merged.append(d)
+                seen_types.add(d.type)
+        drafts = merged if merged else [_stub_draft(msg.patient_id)]
         ctx.logger.info(
             "[PARSE] %d drafts parsed for patient_id=%s pass_id=%s",
             len(drafts),
@@ -327,7 +492,7 @@ async def handle_detection_request(
             msg.pass_id,
             exc,
         )
-        drafts = [_stub_draft(msg.patient_id)]
+        drafts = rule_drafts if rule_drafts else [_stub_draft(msg.patient_id)]
     except Exception as exc:
         ctx.logger.error(
             "[LLM-FAIL] Unexpected error during detection patient_id=%s pass_id=%s: %s "
@@ -336,7 +501,7 @@ async def handle_detection_request(
             msg.pass_id,
             exc,
         )
-        drafts = [_stub_draft(msg.patient_id)]
+        drafts = rule_drafts if rule_drafts else [_stub_draft(msg.patient_id)]
 
     result = WorkerResult(
         pass_id=msg.pass_id,
@@ -499,6 +664,17 @@ async def handle_question_task(ctx: Context, sender: str, task: QuestionTask) ->
         f"Question: {task.question}\n\n"
         "Answer the question based solely on the patient record above."
     )
+
+    if task.api_lookup_instruction:
+        try:
+            lg = json.loads(task.api_lookup_instruction)
+            doc = (lg.get("patient") or {}).get("doctor_name")
+            if doc:
+                cvs_data = await _fetch_cvs_available(ctx, doc)
+                if cvs_data:
+                    user_prompt += f"\n\nLive CVS data: {json.dumps(cvs_data)}"
+        except Exception:
+            pass
 
     ctx.logger.info(
         "[LLM-CALL] domain=%s intent=question action_id=%s max_tokens=%d question=%r",

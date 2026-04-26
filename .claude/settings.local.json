@@ -22,7 +22,13 @@
       "Bash(rg -rn \"ActionDraft\\\\|SupervisorResult\" /Users/shubhan/Autocare/agents/shared/models.py)",
       "Bash(rg -rn \"ActionDraft\" /Users/shubhan/Autocare/agents/)",
       "Bash(python -m py_compile agents/executor/agent.py)",
-      "Bash(python -m py_compile data/seed.py)"
+      "Bash(python -m py_compile data/seed.py)",
+      "Bash(rg executor_not_configured *)",
+      "Bash(npx tsc *)",
+      "Bash(xargs ls *)",
+      "Bash(python *)",
+      "Bash(grep -E \"\\\\.\\(ts|tsx\\)$\")",
+      "Bash(chmod +x *)"
     ]
   }
 }

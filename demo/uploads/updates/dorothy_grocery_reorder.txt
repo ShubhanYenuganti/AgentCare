@@ -1,0 +1,52 @@
+# TARGET: patient_id=pt_003 | POST /patients/pt_003/update/file
+# EXPECTED DOMAIN: grocery
+# EXPECTED ACTION: Grocery reorder needed — 12-day lapse, diabetic staples running low, tier_2
+
+===================================
+CAREGIVER VISIT NOTE — GROCERY & NUTRITION
+===================================
+
+Date: April 25, 2026
+Caregiver: James Reyes
+Patient: Dorothy Kim (pt_003)
+Visit time: 9:15 AM – 10:45 AM
+
+---
+GROCERY ASSESSMENT
+---
+
+As part of today's visit, I conducted a pantry and refrigerator check per standing instructions for Dorothy's diabetic care plan.
+
+LAST DELIVERY ON FILE: April 13, 2026 (12 days ago)
+Safeway weekly delivery had been configured for every Thursday. The April 17 and April 24 deliveries appear to have not occurred — Dorothy could not recall canceling them, and no cancellation confirmation was found in her email.
+
+PANTRY CURRENT STATUS:
+  - Low-glycemic bread: OUT (empty bread box)
+  - Oatmeal: 1 serving remaining
+  - Blueberries: none
+  - Almond milk: 1/4 carton remaining (expires April 28)
+  - Brown rice: adequate (full bag)
+  - Eggs: 3 remaining
+  - Leafy greens: none
+  - Chicken breast: 1 portion in freezer (adequate short-term)
+  - Hummus: none
+
+CONCERN:
+Dorothy's diet is specifically designed to manage blood glucose. Without low-glycemic staples (bread, oatmeal, berries, fresh vegetables), she is at risk of substituting high-GI foods or skipping meals, both of which are dangerous given her Metformin regimen.
+
+This morning she mentioned she had toast with jam for breakfast — white bread from a neighbor. This is outside her care plan.
+
+ACTION REQUESTED:
+Initiate an immediate Safeway grocery reorder for Dorothy's standard staple list. Confirm delivery is scheduled for no later than April 27. Re-establish the weekly Thursday delivery cadence going forward.
+
+Estimated order:
+  - Dave's Killer Bread (low-glycemic), 2 loaves
+  - Steel-cut oatmeal, 1 canister
+  - Blueberries + strawberries (fresh), 2 pints each
+  - Almond milk (unsweetened), 3 cartons
+  - Spinach + arugula, 2 bags each
+  - Chicken breast (fresh), 2 lbs
+  - Hummus (plain), 2 tubs
+  - Eggs, 1 dozen
+
+Caregiver signature: James Reyes

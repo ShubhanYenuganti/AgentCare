@@ -1,0 +1,74 @@
+/**
+ * Shared UI typography (matches AppShell / SF-style stack).
+ * -webkit-font-smoothing for macOS; -moz-osx-font-smoothing for Firefox.
+ */
+html {
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+body {
+  margin: 0;
+  min-height: 100%;
+  font-family: inherit;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+#root {
+  min-height: 100vh;
+  font-family: inherit;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ActionCard Approve / Dismiss: no default black focus ring; theme-colored keyboard focus */
+button[data-testid="approve-btn"]:focus:not(:focus-visible) {
+  outline: none;
+}
+button[data-testid="approve-btn"]:focus-visible {
+  outline: 2px solid #047857;
+  outline-offset: 2px;
+}
+button[data-testid="dismiss-btn"]:focus:not(:focus-visible) {
+  outline: none;
+}
+button[data-testid="dismiss-btn"]:focus-visible {
+  outline: 2px solid #991b1b;
+  outline-offset: 2px;
+}
+
+/* Org dashboard — subtle lift on hover */
+.org-metric-card {
+  transition: box-shadow 0.15s ease, transform 0.15s ease;
+}
+.org-metric-card:hover {
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
+  transform: translateY(-1px);
+}
+.org-caregiver-row {
+  transition: background 0.12s ease, box-shadow 0.12s ease, transform 0.12s ease;
+}
+.org-caregiver-row:hover {
+  background: rgba(255, 255, 255, 0.95);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
+  transform: translateY(-1px);
+}
+.org-protocol-card {
+  transition: box-shadow 0.15s ease, transform 0.15s ease;
+}
+.org-protocol-card:hover {
+  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.06);
+  transform: translateY(-1px);
+}

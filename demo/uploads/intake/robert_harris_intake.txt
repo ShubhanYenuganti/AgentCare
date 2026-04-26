@@ -1,0 +1,114 @@
+# TARGET: patient_id=pt_002 | POST /ingest/file
+# EXPECTED: Creates or updates patient Robert Harris with full life graph data
+
+===================================
+SUNRISE CARE PARTNERS
+CLIENT INTAKE FORM
+===================================
+
+Date of Intake: January 22, 2026
+Intake Coordinator: Tom Callahan
+Form Version: 3.2
+
+---
+SECTION 1: PERSONAL INFORMATION
+---
+Full Name: Robert James Harris
+Date of Birth: August 7, 1942  |  Age: 83
+Gender: Male
+Address: 889 Oak Avenue, Oakland, CA 94602
+Phone: +1-510-555-0186
+Email: rharris1942@yahoo.com
+Preferred Language: English
+Co-resident: Carol Harris (wife, also a Sunrise Care client)
+
+---
+SECTION 2: EMERGENCY CONTACTS
+---
+Contact 1:
+  Name: Carol Harris (wife)
+  Phone: +1-510-555-0188
+  Relationship: spouse (co-resident)
+
+Contact 2:
+  Name: Kim Park (daughter)
+  Phone: +1-510-555-0244
+  Relationship: daughter
+
+---
+SECTION 3: MEDICAL CONDITIONS
+---
+Primary Diagnoses:
+  1. Osteoarthritis — bilateral knees — diagnosed 2018
+  2. Post-operative recovery — right hip replacement, surgery 2024-09-12
+  3. Mild COPD — diagnosed 2021
+
+Allergies:
+  - Aspirin: contraindicated (history of GI bleed)
+  - Codeine: adverse reaction (nausea, confusion)
+
+Last Physical Exam: January 20, 2026 (Dr. Kwame Osei, Kaiser Oakland)
+
+---
+SECTION 4: CURRENT MEDICATIONS
+---
+1. Ibuprofen 400mg — as needed for joint pain (max 3x/day) — for osteoarthritis
+   NOTE: Monitor closely for GI side effects given aspirin history
+
+2. Tiotropium inhaler — once daily (morning) — for COPD management
+   Last refill: 2026-02-14 | Next refill due: 2026-05-14
+
+3. Calcium Carbonate 600mg + Vitamin D3 400 IU — twice daily — bone health
+
+---
+SECTION 5: UPCOMING APPOINTMENTS
+---
+1. Physical Therapy — hip and knee rehabilitation
+   Provider: Oakland Rehab Center
+   Address: 1200 Broadway, Oakland, CA 94612
+   Next session: April 28, 2026 at 10:00 AM
+   Transport needed: YES (Robert cannot drive; wife Carol does not drive)
+   Duration: ~90 minutes
+
+2. COPD follow-up
+   Provider: Dr. Osei, Kaiser Oakland
+   Next scheduled: June 3, 2026
+   Transport needed: Yes (rideshare or caregiver)
+
+---
+SECTION 6: GROCERY & DIETARY PREFERENCES
+---
+Diet type: Heart-healthy, soft foods preferred (post-hip recovery)
+Restrictions: Avoid high-salt, avoid shellfish (preference)
+Preferred delivery: Safeway delivery (bi-weekly)
+Last delivery: April 18, 2026
+
+Staples:
+  - Whole grain crackers
+  - Oatmeal
+  - Orange juice
+  - Eggs
+  - Canned soup (low sodium)
+  - Bananas
+  - Yogurt
+
+---
+SECTION 7: FINANCIAL INFORMATION
+---
+Insurance: Medicare Part A + Part B + Part D
+Supplemental: AARP MediGap Plan G
+
+Recurring bills:
+  - PG&E utility: historically $85-$100/month, autopay via checking account
+    NOTE: April bill arrived at $340 — anomaly requiring review
+  - Comcast internet: ~$65/month
+  - Kaiser Part D premium: ~$28/month
+
+---
+SECTION 8: CARE PREFERENCES & NOTES
+---
+Robert is independent-minded — prefers assistance framed as companionship, not caregiving.
+Walks with a cane; do not rush him.
+Enjoys watching baseball and news; schedule visits around game times when possible.
+Morning visits preferred (before 11am or after 3pm).
+Carol often joins visits — coordinate care for both when on-site.

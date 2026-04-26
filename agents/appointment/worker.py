@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 
 import httpx
 from uagents import Agent, Context
+
+from agents.appointment.gmaps import get_travel_time
+from agents.shared.db import serialize_life_graph
 
 from agents.shared.api_capabilities import worker_api_capability_block
 from agents.shared.config import APPOINTMENT_WORKER_SEED, LocalFirstResolver
@@ -133,6 +137,92 @@ async def _fetch_cal_available(ctx: Context, patient_id: str, doctor_name: str) 
             _trunc(response_text or "", 200),
         )
         return None
+
+
+async def _run_appointment_rule_checks_async(
+    life_graph: dict, patient_id: str, ctx: Context
+) -> list[dict]:
+    items: list[dict] = []
+    today = datetime.now(timezone.utc).date()
+    patient_address = life_graph.get("patient", {}).get("address", "")
+
+    for appt in life_graph.get("appointments", []):
+        if not appt.get("active", 1):
+            continue
+        next_sched = appt.get("next_scheduled")
+        if not next_sched:
+            continue
+        try:
+            sched_date = date.fromisoformat(next_sched)
+        except ValueError:
+            continue
+
+        days_overdue = (today - sched_date).days
+        if days_overdue > 0:
+            urgency = "tier_1" if days_overdue > 14 else "tier_2"
+            caregiver_email = (life_graph.get("assigned_caregivers") or [{}])[0].get("email")
+            tomorrow = (datetime.now(timezone.utc) + timedelta(days=1)).date().isoformat()
+            items.append({
+                "type": "overdue_appointment",
+                "urgency": urgency,
+                "description": (
+                    f"Appointment with {appt.get('provider', 'provider')} is overdue "
+                    f"by {days_overdue} day(s) (was scheduled {next_sched})"
+                ),
+                "draft_content": (
+                    f"Patient {patient_id} missed a scheduled appointment with "
+                    f"{appt.get('provider', 'provider')} ({appt.get('specialty', '')}) "
+                    f"on {next_sched}. Please reschedule as soon as possible. "
+                    f"Clinic: {appt.get('clinic_address', 'N/A')}, "
+                    f"Phone: {appt.get('phone', 'N/A')}."
+                ),
+                "manual_action_type": "caregiver_scheduling",
+                "review_by": tomorrow,
+                "recipient_type": "caregiver",
+                "recipient_email": caregiver_email,
+            })
+
+        days_until = (sched_date - today).days
+        if 0 <= days_until <= 2:
+            clinic_address = appt.get("clinic_address", "")
+            eta = None
+            if patient_address and clinic_address:
+                try:
+                    eta = await asyncio.to_thread(get_travel_time, patient_address, clinic_address)
+                except Exception as exc:
+                    ctx.logger.warning("[RULE-CHECK] gmaps failed for appt %s: %s", appt.get("appt_id"), exc)
+
+            eta_text = ""
+            manual_action = None
+            if eta:
+                rows = (eta.get("rows") or [{}])[0]
+                elements = (rows.get("elements") or [{}])[0]
+                duration = elements.get("duration", {}).get("text", "")
+                if duration:
+                    eta_text = f" Estimated travel time: {duration}."
+                    manual_action = "transport"
+
+            items.append({
+                "type": "visit_prep",
+                "urgency": "tier_2",
+                "description": (
+                    f"Upcoming appointment with {appt.get('provider', 'provider')} "
+                    f"in {days_until} day(s) on {next_sched}"
+                ),
+                "draft_content": (
+                    f"Patient {patient_id} has an appointment with "
+                    f"{appt.get('provider', 'provider')} ({appt.get('specialty', '')}) "
+                    f"on {next_sched}.{eta_text} "
+                    f"Clinic: {clinic_address or 'N/A'}, "
+                    f"Phone: {appt.get('phone', 'N/A')}. Please prepare for the visit."
+                ),
+                "manual_action_type": manual_action,
+                "review_by": None,
+                "recipient_type": None,
+                "recipient_email": None,
+            })
+
+    return items
 
 
 def _stub_draft(patient_id: str) -> ActionDraft:
@@ -293,6 +383,33 @@ async def handle_detection_request(
         _trunc(system_prompt, 120),
     )
 
+    rule_drafts: list[ActionDraft] = []
+    try:
+        life_graph = await asyncio.to_thread(serialize_life_graph, msg.patient_id)
+        if life_graph:
+            rule_items = await _run_appointment_rule_checks_async(life_graph, msg.patient_id, ctx)
+            rule_drafts = [
+                ActionDraft(
+                    action_id=f"rule_{uuid4().hex[:12]}",
+                    patient_id=msg.patient_id,
+                    domain=_DOMAIN,
+                    type=item["type"],
+                    description=item["description"],
+                    draft_content=item.get("draft_content"),
+                    urgency_level=item["urgency"],
+                    review_by=item.get("review_by") or (datetime.now(timezone.utc) + timedelta(hours=48)).isoformat(),
+                    manual_action_type=item.get("manual_action_type"),
+                    api_payload=None,
+                    recipient_email=item.get("recipient_email"),
+                    recipient_type=item.get("recipient_type"),
+                    email_subject=None,
+                )
+                for item in rule_items
+            ]
+            ctx.logger.info("[RULE-CHECK] pass_id=%s rule_drafts=%d", msg.pass_id, len(rule_drafts))
+    except Exception as exc:
+        ctx.logger.error("[RULE-CHECK] Failed pass_id=%s: %s", msg.pass_id, exc)
+
     drafts: list[ActionDraft] = []
     try:
         raw = call_claude_json(system_prompt, user_prompt, max_tokens=2000)
@@ -322,6 +439,14 @@ async def handle_detection_request(
                 d.urgency_level,
                 _trunc(d.description, 80),
             )
+        # Merge: rule drafts first, then LLM drafts for new types
+        seen_types = {d.type for d in rule_drafts}
+        merged = list(rule_drafts)
+        for d in drafts:
+            if d.type not in seen_types:
+                merged.append(d)
+                seen_types.add(d.type)
+        drafts = merged if merged else [_stub_draft(msg.patient_id)]
     except RuntimeError as exc:
         ctx.logger.warning(
             "[LLM-FAIL] LLM unavailable for detection patient_id=%s pass_id=%s: %s "
@@ -330,7 +455,7 @@ async def handle_detection_request(
             msg.pass_id,
             exc,
         )
-        drafts = [_stub_draft(msg.patient_id)]
+        drafts = rule_drafts if rule_drafts else [_stub_draft(msg.patient_id)]
     except Exception as exc:
         ctx.logger.error(
             "[LLM-FAIL] Unexpected error during detection patient_id=%s pass_id=%s: %s "
@@ -339,7 +464,7 @@ async def handle_detection_request(
             msg.pass_id,
             exc,
         )
-        drafts = [_stub_draft(msg.patient_id)]
+        drafts = rule_drafts if rule_drafts else [_stub_draft(msg.patient_id)]
 
     result = WorkerResult(
         pass_id=msg.pass_id,
@@ -500,6 +625,17 @@ async def handle_question_task(ctx: Context, sender: str, task: QuestionTask) ->
         f"Question: {task.question}\n\n"
         "Answer the question based solely on the patient record above."
     )
+
+    if task.api_lookup_instruction:
+        try:
+            lg = json.loads(task.api_lookup_instruction)
+            doc = (lg.get("patient") or {}).get("doctor_name")
+            if doc:
+                cal_data = await _fetch_cal_available(ctx, task.patient_id, doc)
+                if cal_data:
+                    user_prompt += f"\n\nLive calendar availability data: {json.dumps(cal_data)}"
+        except Exception:
+            pass
 
     ctx.logger.info(
         "[LLM-CALL] domain=%s intent=question action_id=%s max_tokens=%d question=%r",

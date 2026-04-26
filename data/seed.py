@@ -290,29 +290,131 @@ PATIENT_CAREGIVER_ASSIGNMENTS = [
     ("pt_003", "cg_002"),
 ]
 
-SEEDED_OVERDUE_ACTION = {
-    "action_id": "act_seed_overdue_001",
-    "patient_id": "pt_003",
-    "domain": "health",
-    "type": "manual_approval",
-    "description": "Metformin missed 4 days — condition worsening escalation",
-    "draft_content": (
-        "Dear Dr. Reyes, Dorothy Kim (68) missed her Metformin 500mg for 4 consecutive "
-        "days. Caregiver notes from Apr 22 report increased fatigue and dizziness. "
-        "Requesting immediate review and guidance on next steps."
-    ),
-    "urgency_level": "tier_0",
-    "is_overdue": 1,
-    "review_by": "2026-04-23T09:00:00Z",
-    "invocation_date": "2026-04-23T07:00:00Z",
-    "escalation_count": 1,
-    "reviewed": 0,
-    "completed": 0,
-    "completion_date": None,
-    "assigned_caregiver": None,
-    "caregiver_options_json": None,
-    "outcome": None,
-}
+SEEDED_ACTIONS = [
+    # ── Health: Metformin missed 4 days (tier_0, overdue) ──────────────────────
+    {
+        "action_id": "act_seed_001",
+        "patient_id": "pt_003",
+        "domain": "health",
+        "type": "manual_approval",
+        "description": "Metformin missed 4 days — condition worsening escalation",
+        "draft_content": (
+            "Dear Dr. Reyes, Dorothy Kim (68) missed her Metformin 500mg for 4 consecutive "
+            "days. Caregiver notes from Apr 22 report increased fatigue and dizziness. "
+            "Requesting immediate review and guidance on next steps."
+        ),
+        "urgency_level": "tier_0",
+        "is_overdue": 1,
+        "review_by": "2026-04-23T09:00:00Z",
+        "invocation_date": "2026-04-23T07:00:00Z",
+        "escalation_count": 1,
+        "scheduling_status": None,
+        "manual_action_type": None,
+    },
+    # ── Appointment: Margaret Chen overdue cardiology visit (tier_1) ───────────
+    {
+        "action_id": "act_seed_002",
+        "patient_id": "pt_001",
+        "domain": "appointment",
+        "type": "manual_approval",
+        "description": "Cardiology follow-up overdue — last visit Aug 2025, now 8 months overdue",
+        "draft_content": (
+            "Dear Dr. Patel, Margaret Chen (74) is due for her 6-month cardiology follow-up. "
+            "Her last visit was August 10, 2025 — she is now 8 months overdue. "
+            "Please advise on availability for an appointment in late April or May 2026."
+        ),
+        "urgency_level": "tier_1",
+        "is_overdue": 1,
+        "review_by": "2026-04-26T17:00:00Z",
+        "invocation_date": "2026-04-24T08:00:00Z",
+        "escalation_count": 0,
+        "scheduling_status": None,
+        "manual_action_type": None,
+    },
+    # ── Appointment: Robert Harris PT scheduling needed (tier_1) ──────────────
+    {
+        "action_id": "act_seed_003",
+        "patient_id": "pt_002",
+        "domain": "appointment",
+        "type": "scheduling",
+        "description": "Physical therapy appointment — caregiver transport needed Apr 28",
+        "draft_content": (
+            "Robert Harris (81) has a physical therapy appointment scheduled for Apr 28 at "
+            "SFGH (1001 Potrero Ave). He requires caregiver transport — 48h advance notice required. "
+            "Please assign an available caregiver for morning transport."
+        ),
+        "urgency_level": "tier_1",
+        "is_overdue": 0,
+        "review_by": "2026-04-26T12:00:00Z",
+        "invocation_date": "2026-04-24T09:00:00Z",
+        "escalation_count": 0,
+        "scheduling_status": "pending_approval",
+        "manual_action_type": "transport",
+        "caregiver_options_json": '[{"caregiver_id":"cg_004","name":"Marcus Webb","available":true},{"caregiver_id":"cg_006","name":"Tom Callahan","available":true},{"caregiver_id":"cg_008","name":"Kevin Huang","available":true}]',
+    },
+    # ── Financial: PG&E anomaly for Robert Harris (tier_1) ────────────────────
+    {
+        "action_id": "act_seed_004",
+        "patient_id": "pt_002",
+        "domain": "financial",
+        "type": "manual_approval",
+        "description": "PG&E bill $340 — 258% above baseline $95, review before payment",
+        "draft_content": (
+            "Robert Harris received a PG&E bill of $340 due Apr 30, compared to his prior "
+            "average of $95. This is 258% above baseline and requires admin review before "
+            "any payment action is taken per org financial protocol."
+        ),
+        "urgency_level": "tier_1",
+        "is_overdue": 0,
+        "review_by": "2026-04-29T17:00:00Z",
+        "invocation_date": "2026-04-24T08:30:00Z",
+        "escalation_count": 0,
+        "scheduling_status": None,
+        "manual_action_type": None,
+    },
+    # ── Grocery: Margaret Chen staples overdue (tier_2) ───────────────────────
+    {
+        "action_id": "act_seed_005",
+        "patient_id": "pt_001",
+        "domain": "grocery",
+        "type": "manual_approval",
+        "description": "Weekly grocery staples overdue — last delivery Apr 12, 12 days ago",
+        "draft_content": (
+            "Margaret Chen's weekly grocery staples are overdue. Last delivery was Apr 12 "
+            "(12 days ago). Items needed: spinach, chicken breast, greek yogurt (all 7-day "
+            "frequency). Brown rice (14-day) is also overdue. Please approve reorder for "
+            "delivery this week."
+        ),
+        "urgency_level": "tier_2",
+        "is_overdue": 1,
+        "review_by": "2026-04-27T12:00:00Z",
+        "invocation_date": "2026-04-24T10:00:00Z",
+        "escalation_count": 0,
+        "scheduling_status": None,
+        "manual_action_type": None,
+    },
+    # ── Appointment: Dorothy Kim endocrinology — caregiver assigned, unconfirmed ──
+    {
+        "action_id": "act_seed_006",
+        "patient_id": "pt_003",
+        "domain": "appointment",
+        "type": "scheduling",
+        "description": "Endocrinology follow-up Apr 30 — transport assigned, awaiting confirmation",
+        "draft_content": (
+            "Dorothy Kim (68) has an endocrinology appointment Apr 30 with Dr. Carlos Reyes "
+            "(2340 Sutter St). Family transport preferred but unavailable — Sarah Okafor (cg_001) "
+            "has been assigned. Awaiting caregiver confirmation."
+        ),
+        "urgency_level": "tier_1",
+        "is_overdue": 0,
+        "review_by": "2026-04-28T12:00:00Z",
+        "invocation_date": "2026-04-24T09:30:00Z",
+        "escalation_count": 0,
+        "scheduling_status": "unconfirmed",
+        "manual_action_type": "transport",
+        "assigned_caregiver": "cg_001",
+    },
+]
 
 DAY_MAP = {"Mon": 0, "Tue": 1, "Wed": 2, "Thu": 3, "Fri": 4, "Sat": 5, "Sun": 6}
 SEED_DATE = date(2026, 4, 24)
@@ -516,38 +618,36 @@ def _seed_assignments(conn: sqlite3.Connection) -> None:
     )
 
 
-def _seed_overdue_action(conn: sqlite3.Connection) -> None:
-    action = SEEDED_OVERDUE_ACTION
-    conn.execute(
-        """
-        INSERT INTO action_history (
-            action_id, patient_id, domain, type, description, draft_content, urgency_level,
-            review_by, invocation_date, is_overdue, escalation_count, reviewed, completed,
-            completion_date, assigned_caregiver, caregiver_options_json, outcome,
-            draft_version, modification_in_progress
+def _seed_actions(conn: sqlite3.Connection) -> None:
+    for action in SEEDED_ACTIONS:
+        conn.execute(
+            """
+            INSERT INTO action_history (
+                action_id, patient_id, domain, type, description, draft_content, urgency_level,
+                review_by, invocation_date, is_overdue, escalation_count, scheduling_status,
+                manual_action_type, reviewed, completed, completion_date, assigned_caregiver,
+                caregiver_options_json, outcome, draft_version, modification_in_progress
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, NULL, ?, ?, NULL, 1, 0)
+            """,
+            (
+                action["action_id"],
+                action["patient_id"],
+                action["domain"],
+                action["type"],
+                action["description"],
+                action["draft_content"],
+                action["urgency_level"],
+                action["review_by"],
+                action["invocation_date"],
+                action["is_overdue"],
+                action["escalation_count"],
+                action.get("scheduling_status"),
+                action.get("manual_action_type"),
+                action.get("assigned_caregiver"),
+                action.get("caregiver_options_json"),
+            ),
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0)
-        """,
-        (
-            action["action_id"],
-            action["patient_id"],
-            action["domain"],
-            action["type"],
-            action["description"],
-            action["draft_content"],
-            action["urgency_level"],
-            action["review_by"],
-            action["invocation_date"],
-            action["is_overdue"],
-            action["escalation_count"],
-            action["reviewed"],
-            action["completed"],
-            action["completion_date"],
-            action["assigned_caregiver"],
-            action["caregiver_options_json"],
-            action["outcome"],
-        ),
-    )
 
 
 def main() -> None:
@@ -566,7 +666,7 @@ def main() -> None:
         _seed_financial(connection)
         _seed_caregivers_and_schedule(connection)
         _seed_assignments(connection)
-        _seed_overdue_action(connection)
+        _seed_actions(connection)
         connection.commit()
 
 

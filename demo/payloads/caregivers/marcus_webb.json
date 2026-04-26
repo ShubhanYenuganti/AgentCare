@@ -1,0 +1,13 @@
+{
+  "name": "Marcus Webb",
+  "email": "marcus.webb@sunrisecare.org",
+  "phone": "+1-555-1004",
+  "role": "caregiver",
+  "schedule": {
+    "Mon": { "start": "12:00", "end": "20:00" },
+    "Tue": { "start": "12:00", "end": "20:00" },
+    "Thu": { "start": "12:00", "end": "20:00" },
+    "Fri": { "start": "12:00", "end": "20:00" },
+    "Sun": { "start": "10:00", "end": "16:00" }
+  }
+}

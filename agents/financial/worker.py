@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 
 from uagents import Agent, Context
+
+from agents.shared.db import serialize_life_graph
 
 from agents.shared.api_capabilities import worker_api_capability_block
 from agents.shared.config import FINANCIAL_WORKER_SEED, LocalFirstResolver
@@ -87,6 +90,98 @@ _QUESTION_BASE_PROMPT = (
     "Use the provided action context to give a clear, evidence-based answer. "
     "Return only the answer text — no commentary."
 )
+
+
+def _run_financial_rule_checks(life_graph: dict, patient_id: str) -> list[dict]:
+    items: list[dict] = []
+    today = datetime.now(timezone.utc).date()
+
+    # Rule 1: Bill due alert (5-day window)
+    for bill in life_graph.get("financial_bills", []):
+        if not bill.get("active", 1):
+            continue
+        due_str = bill.get("due_date")
+        if not due_str:
+            continue
+        try:
+            due_date = date.fromisoformat(due_str)
+        except ValueError:
+            continue
+        days_until = (due_date - today).days
+        if 0 <= days_until <= 5:
+            urgency = "tier_1" if days_until <= 2 else "tier_2"
+            items.append({
+                "type": "bill_due_alert",
+                "urgency": urgency,
+                "description": (
+                    f"Bill '{bill.get('name')}' of ${bill.get('amount', 'N/A')} "
+                    f"due in {days_until} day(s) on {due_str}"
+                ),
+                "draft_content": (
+                    f"Patient {patient_id} has a bill '{bill.get('name')}' "
+                    f"for ${bill.get('amount', 'N/A')} due on {due_str} "
+                    f"({days_until} day(s) remaining). Please ensure payment is arranged."
+                ),
+            })
+
+    # Rule 2: Missed autopay (autopay=1, past due)
+    for bill in life_graph.get("financial_bills", []):
+        if not bill.get("active", 1):
+            continue
+        if not bill.get("autopay"):
+            continue
+        due_str = bill.get("due_date")
+        if not due_str:
+            continue
+        try:
+            due_date = date.fromisoformat(due_str)
+        except ValueError:
+            continue
+        if due_date < today:
+            items.append({
+                "type": "missed_autopay",
+                "urgency": "tier_1",
+                "description": (
+                    f"Autopay missed for bill '{bill.get('name')}' of ${bill.get('amount', 'N/A')} "
+                    f"(was due {due_str})"
+                ),
+                "draft_content": (
+                    f"Patient {patient_id}'s autopay failed for '{bill.get('name')}' "
+                    f"(${bill.get('amount', 'N/A')}) which was due on {due_str}. "
+                    "Please investigate the autopay failure and arrange manual payment."
+                ),
+            })
+
+    # Rule 3: Spending anomaly
+    anomalies = life_graph.get("financial_anomalies", [])
+    current_month = today.strftime("%Y-%m")
+    current_month_count = sum(
+        1 for a in anomalies
+        if (a.get("detected_at") or "").startswith(current_month)
+    )
+    trailing_count = len(anomalies) - current_month_count
+    trailing_avg = trailing_count / 3.0 if trailing_count > 0 else 0
+    flagged = False
+    if trailing_avg > 0 and current_month_count > (trailing_avg * 1.5):
+        flagged = True
+    elif current_month_count >= 3:
+        flagged = True
+    if flagged:
+        items.append({
+            "type": "spending_anomaly",
+            "urgency": "tier_2",
+            "description": (
+                f"Elevated spending anomalies this month: {current_month_count} detected "
+                f"(trailing avg: {trailing_avg:.1f}/month)"
+            ),
+            "draft_content": (
+                f"Patient {patient_id} has {current_month_count} financial anomalies detected "
+                f"in {current_month}, compared to a trailing average of {trailing_avg:.1f}/month. "
+                "Please review recent transactions for irregularities."
+            ),
+        })
+
+    return items
 
 
 def _short(addr: str) -> str:
@@ -212,6 +307,33 @@ async def handle_detection(
         _DOMAIN, msg.patient_id, msg.trigger, _trunc(system, 120),
     )
 
+    rule_drafts: list[ActionDraft] = []
+    try:
+        life_graph = await asyncio.to_thread(serialize_life_graph, msg.patient_id)
+        if life_graph:
+            rule_items = await asyncio.to_thread(_run_financial_rule_checks, life_graph, msg.patient_id)
+            rule_drafts = [
+                ActionDraft(
+                    action_id=f"rule_{uuid4().hex[:12]}",
+                    patient_id=msg.patient_id,
+                    domain=_DOMAIN,
+                    type=item["type"],
+                    description=item["description"],
+                    draft_content=item.get("draft_content"),
+                    urgency_level=item["urgency"],
+                    review_by=(datetime.now(timezone.utc) + timedelta(hours=48)).isoformat(),
+                    manual_action_type=None,
+                    api_payload=None,
+                    recipient_email=None,
+                    recipient_type=None,
+                    email_subject=None,
+                )
+                for item in rule_items
+            ]
+            ctx.logger.info("[RULE-CHECK] pass_id=%s rule_drafts=%d", msg.pass_id, len(rule_drafts))
+    except Exception as exc:
+        ctx.logger.error("[RULE-CHECK] Failed pass_id=%s: %s", msg.pass_id, exc)
+
     drafts: list[ActionDraft] = []
     try:
         raw = call_claude_json(system, user_prompt, max_tokens=2000)
@@ -240,20 +362,28 @@ async def handle_detection(
                 i + 1, len(drafts), d.action_id, d.type, d.urgency_level,
                 _trunc(d.description, 80),
             )
+        # Merge: rule drafts first, then LLM drafts for new types
+        seen_types = {d.type for d in rule_drafts}
+        merged = list(rule_drafts)
+        for d in drafts:
+            if d.type not in seen_types:
+                merged.append(d)
+                seen_types.add(d.type)
+        drafts = merged if merged else [_stub_draft(msg.patient_id)]
     except RuntimeError as exc:
         ctx.logger.warning(
             "[LLM-FAIL] LLM unavailable for detection patient_id=%s pass_id=%s: %s "
             "— returning stub draft",
             msg.patient_id, msg.pass_id, exc,
         )
-        drafts = [_stub_draft(msg.patient_id)]
+        drafts = rule_drafts if rule_drafts else [_stub_draft(msg.patient_id)]
     except Exception as exc:
         ctx.logger.error(
             "[LLM-FAIL] Unexpected error during detection patient_id=%s pass_id=%s: %s "
             "— returning stub draft",
             msg.patient_id, msg.pass_id, exc,
         )
-        drafts = [_stub_draft(msg.patient_id)]
+        drafts = rule_drafts if rule_drafts else [_stub_draft(msg.patient_id)]
 
     if not drafts:
         drafts = [_stub_draft(msg.patient_id)]

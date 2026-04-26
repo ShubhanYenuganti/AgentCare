@@ -1,4 +1,10 @@
-## ADDED Requirements
+# API Dashboard Live Data
+
+## Purpose
+
+Defines the behavior of the API layer for serving live, SQLite-backed data to the dashboard, including response envelopes, route data binding, and consumption of enriched patient and action fields.
+
+## Requirements
 
 ### Requirement: Live API Route Wiring
 The API layer SHALL replace Sprint 1 placeholder responses with SQLite-backed live data operations for actions, patients, caregivers, scheduling, notifications, ingest, and org context.
@@ -32,3 +38,14 @@ Dashboard routes SHALL consume live API contracts and render loading, success, a
 #### Scenario: Patients and caregivers routes stay contract-parity
 - **WHEN** dashboard loads Patients or Caregivers routes
 - **THEN** each route MUST render data using the same canonical API contracts used by backend integration tests
+
+### Requirement: Dashboard polling on enriched API responses
+The dashboard API client SHALL consume the enriched patient and action list responses added by the backend-domain-and-api-completion change, including `pending_action_count`, `overdue_action_count`, `highest_urgency_level`, `patient_name`, `is_overdue`, and `scheduling_status` fields.
+
+#### Scenario: Enriched patient fields displayed
+- **WHEN** the Patient Roster sidebar renders a patient row
+- **THEN** it displays `pending_action_count` and `highest_urgency_level` from the enriched API response
+
+#### Scenario: is_overdue field drives banner
+- **WHEN** the Action Feed renders a card with `is_overdue=true`
+- **THEN** the overdue banner is displayed using the `is_overdue` field from the API response (not a client-side date calculation)

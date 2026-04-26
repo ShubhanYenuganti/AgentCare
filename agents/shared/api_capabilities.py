@@ -380,3 +380,52 @@ def worker_api_capability_block(domain: str) -> str:
 
     lines.extend(_all_post_template_catalog_lines())
     return "\n".join(lines)
+
+
+def build_execution_plan_preview(action: dict[str, Any]) -> dict[str, Any]:
+    """
+    Non-mutating summary of likely approve-time calls for dashboard display.
+    Mirrors api.routers.actions._build_execution_steps routing without URLs or secrets.
+    """
+    import os
+
+    steps: list[dict[str, Any]] = []
+    route, route_params, route_errors, route_source = resolve_route_and_params_from_action(action)
+    if route and str(route).startswith("POST /mock/"):
+        steps.append(
+            {
+                "kind": "mock_api",
+                "route": route,
+                "method": "POST",
+                "preflight_errors": list(route_errors or []),
+            }
+        )
+
+    gmaps_on = (os.getenv("ENABLE_GMAPS_ON_APPROVE") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if gmaps_on:
+        domain = str(action.get("domain") or "").strip().lower()
+        manual = str(action.get("manual_action_type") or "").strip().lower()
+        if domain == "appointment" and manual in {"transport", "caregiver_availability"}:
+            api_key = os.getenv("GOOGLE_MAPS_API_KEY") or ""
+            if route_params.get("origins") and route_params.get("destinations") and api_key:
+                steps.append(
+                    {
+                        "kind": "gmaps",
+                        "route": "GET gmaps:/maps/api/distancematrix/json",
+                        "method": "GET",
+                    }
+                )
+
+    if action.get("recipient_email"):
+        steps.append({"kind": "resend", "route": "POST resend:/emails", "method": "POST"})
+
+    return {
+        "steps": steps,
+        "inferred_route": route,
+        "route_source": route_source,
+    }
