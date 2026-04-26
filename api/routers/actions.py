@@ -24,6 +24,7 @@ from agents.shared.db import (
     get_action,
     get_action_rankings,
     get_chat_history,
+    get_completed_autonomous_approved_actions,
     get_connection,
     get_pending_actions,
     update_action,
@@ -110,6 +111,12 @@ async def list_actions(
             actions.sort(key=lambda a: a.get("created_at") or "", reverse=True)
         else:
             actions = get_action_rankings()
+
+        pending_ids = {a.get("action_id") for a in actions}
+        for a in get_completed_autonomous_approved_actions(40):
+            if a.get("action_id") and a["action_id"] not in pending_ids:
+                actions.append(a)
+                pending_ids.add(a["action_id"])
 
         if domain is not None:
             actions = [a for a in actions if a.get("domain") == domain]

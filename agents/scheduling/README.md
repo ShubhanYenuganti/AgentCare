@@ -1,51 +1,32 @@
 # Scheduling Agent
 
-The **Scheduling Agent** is a standalone domain agent in the Autocare multi-agent system. It handles all scheduling-related queries, such as finding caregiver availability, matching time slots, and coordinating scheduling options.
+This agent remains in the repository for compatibility, but scheduling is largely handled by domain actions with `schedule` metadata plus API/UI assignment workflows.
 
-## What it does
+## Status
+- Legacy-compatible scheduling helper.
+- Not part of the primary detection fan-out domains.
+- Current product flow typically uses `/scheduling/*` API routes + caregiver UI for assignment confirmation.
 
-- Receives a `MockDomainTask` (domain `"scheduling"`) forwarded by the Executor.
-- Processes the scheduling query and returns a `MockSupervisorResult` back to the Executor with matched scheduling options.
+## Component
+- `scheduling-agent` (port `8501`)
 
-## Triggered by keywords
+## Supported message paths
+- `MockDomainTask` (legacy mock response path for domain `scheduling`).
+- `SchedulingQuery` -> returns `SchedulingOptions`.
 
-`schedule`, `availability`, `caregiver`, `slot`
+## Internal behaviors
+- Pulls caregiver availability from mock API.
+- Updates action scheduling metadata (`caregiver_options_json`, `scheduling_status`).
+- Supports helper functions to:
+  - select/book a caregiver (`handle_scheduling_selection`),
+  - decline/release assignment (`handle_scheduling_decline`).
+- Emits scheduling notifications when state changes.
 
-## Message flow
-
-```
-Executor  →  MockDomainTask  →  Scheduling Agent
-    ↑                                   |
-    └────────  MockSupervisorResult  ───┘
-```
-
-## Message schemas
-
-**Input** — `MockDomainTask`
-
-| Field | Type | Description |
-|---|---|---|
-| `request_id` | `str` | Unique request identifier |
-| `domain` | `str` | Must be `"scheduling"` |
-| `query` | `str` | Free-text scheduling query |
-| `user_sender_address` | `str \| None` | Return address for chat replies |
-| `metadata` | `dict \| None` | Optional context metadata |
-
-**Output** — `MockSupervisorResult`
-
-| Field | Type | Description |
-|---|---|---|
-| `request_id` | `str` | Echoed from the input task |
-| `domain` | `str` | `"scheduling"` |
-| `supervisor` | `str` | `"scheduling-agent"` |
-| `result` | `str` | Human-readable scheduling outcome |
-
-## Port
-
-`8501`
+## Notes
+- File header marks this agent as deprecated for primary production scheduling.
+- Keep for backward compatibility and integration experiments.
 
 ## Running
-
-```
+```bash
 python -m agents.scheduling.agent
 ```

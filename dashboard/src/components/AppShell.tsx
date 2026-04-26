@@ -7,6 +7,7 @@ const NAV_LINKS = [
   { to: "/patients", label: "Patients" },
   { to: "/caregivers", label: "Caregivers" },
   { to: "/org", label: "Org" },
+  { to: "/chat", label: "Chat" },
 ];
 
 const TOP_BAR_STYLE: CSSProperties = {
@@ -69,7 +70,7 @@ export default function AppShell() {
       }}
     >
       <header style={TOP_BAR_STYLE}>
-        <span style={BRAND_STYLE}>MACOS</span>
+        <span style={BRAND_STYLE}>AgentCare</span>
         <nav style={NAV_ROW}>
           {NAV_LINKS.map((link) => (
             <NavLink

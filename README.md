@@ -1,278 +1,355 @@
-# MACOS
+# AgentCare (MACOS)
 
 ## Abstract
-MACOS (Multi-Agent Care Operations System) is designed to help nonprofit caregiving organizations coordinate care for multiple patients and caregivers across health, appointments, groceries, and finances. The motivation in `MACOS_build_spec_v7_final.md` is to replace fragmented, manual follow-up workflows with a single event-driven operations layer: when patient information changes, domain agents detect risk, generate prioritized actions, and route those actions to caregivers through dashboard and chat workflows. The intended outcome is faster response to care issues, clearer accountability, and safer escalation handling with structured, auditable state.
+AgentCare is a multi-layer autonomous care-operations system built to support caregiver teams running real-world patient workloads across health, appointments, groceries, and financial follow-ups. It combines ingestion pipelines, domain-specific agents, deterministic task state management, and operator-facing UI workflows into one coordinated runtime.
 
-## Project File Structure
+The core operating model is event-driven:
+- caregivers ingest or update patient data,
+- the executor fans that context across domain supervisors/workers,
+- autonomous tasks are generated and queued with urgency classification,
+- manual tasks are created with explicit, verbose caregiver instructions and scheduling metadata,
+- overdue detection escalates risk and pushes alerts to dashboard + ASI:One channels.
 
-### Target Structure (from `MACOS_build_spec_v7_final.md`)
-```text
-macos/
-├── agents/
-│   ├── shared/
-│   │   ├── __init__.py
-│   │   ├── db.py
-│   │   ├── models.py
-│   │   ├── llm.py
-│   │   └── constants.py
-│   ├── executor/
-│   │   └── agent.py
-│   ├── health/
-│   │   ├── supervisor.py
-│   │   └── worker.py
-│   ├── appointment/
-│   │   ├── supervisor.py
-│   │   └── worker.py
-│   ├── grocery/
-│   │   ├── supervisor.py
-│   │   └── worker.py
-│   ├── financial/
-│   │   ├── supervisor.py
-│   │   └── worker.py
-│   ├── scheduling/
-│   │   └── agent.py
-│   └── run_all.py
-├── api/
-│   ├── main.py
-│   ├── routers/
-│   │   ├── patients.py
-│   │   ├── actions.py
-│   │   ├── caregivers.py
-│   │   ├── scheduling.py
-│   │   ├── notifications.py
-│   │   ├── ingest.py
-│   │   └── org.py
-│   ├── mock_apis/
-│   │   ├── cvs.py
-│   │   ├── cal.py
-│   │   ├── instacart.py
-│   │   ├── amazon.py
-│   │   └── caregivers.py
-│   └── db_bridge.py
-├── dashboard/
-│   ├── index.html
-│   ├── vite.config.ts
-│   ├── tailwind.config.ts
-│   └── src/
-│       ├── main.tsx
-│       ├── App.tsx
-│       ├── api/client.ts
-│       ├── components/
-│       ├── pages/
-│       ├── hooks/
-│       └── types/index.ts
-├── data/
-│   ├── seed.py
-│   ├── life_graph.db
-│   └── schema.sql
-├── .env.example
-├── requirements.txt
-├── package.json
-└── README.md
-```
+It also provides built-in explainability interfaces at two scopes:
+- task-scoped reasoning (why this action exists, what it will do, what changed),
+- organization/patient-profile scope (cross-patient operational questions, pending risk, and workload state).
 
-### Current Structure (fully implemented)
-```text
-agents/
-  shared/{config.py,constants.py,db.py,llm.py,models.py,state_service.py,notifications.py}
-  executor/agent.py          # Intent routing, fan-out, expiration loop
-  {health,appointment,grocery,financial}/{supervisor.py,worker.py,openfda.py}
-  scheduling/agent.py        # Scheduling query/selection state machine
-  run_all.py
-api/
-  main.py
-  routers/{actions.py,patients.py,caregivers.py,scheduling.py,notifications.py,ingest.py,org.py}
-  mock_apis/                 # CVS, calendar, Instacart, Amazon, caregiver mock endpoints
-dashboard/
-  index.html
-  vite.config.ts
-  playwright.config.ts
-  src/
-    main.tsx                 # Redux Provider, lazy-loaded routes
-    components/
-      AppShell.tsx           # TopBar + NavTabs
-      ActionCard.tsx         # Polymorphic card (health-modify, Q&A, scheduling)
-      ActionChatPanel.tsx    # Slide-over chat drawer with 3s polling
-      DraftModal.tsx         # Inline draft edit + PATCH submission
-    views/
-      ActionFeed.tsx         # 10s polling, urgency-sorted action cards
-      PatientRoster.tsx      # Split layout, add/update workflows, staged confirmation
-      CaregiverManagement.tsx# Scheduling strip, 14-day grid, confirm/decline
-      OrgDashboard.tsx       # Org summary, protocol cards, metrics, edit form
-    api/client.ts            # RTK Query API slice (all endpoints)
-    types/index.ts           # Shared TypeScript interfaces
-  e2e/                       # Playwright E2E tests for all four views
-data/
-  schema.sql
-  seed.py
-  life_graph.db (generated)
-tests/
-  integration/               # FastAPI integration tests (patient update, ingest, detect)
-  test_health_detection.py
-  test_appointment_detection.py
-  test_grocery_detection.py
-  test_financial_detection.py
-  test_scheduling_e2e.py
-  test_expiration_loop.py
-docs/
-  architecture.md
-  demo-checklist.md
-```
+Modification support is currently constrained by policy: **task modification is enabled for the health domain only**.
 
-## What Is Implemented
+---
 
-### Backend
-- Full multi-agent stack: Executor → Domain Supervisors → Workers (health, appointment, grocery, financial, scheduling).
-- Event-driven patient detection fan-out on `patient_create` and `patient_update` triggers.
-- Scheduling agent: query → options → numeric selection → `pending_approval → unconfirmed → confirmed/declined` lifecycle.
-- Expiration loop: marks overdue actions, emits deduped notifications per channel (dashboard, ASI:One).
-- Patient ingest: text and file (PDF/image) → LLM extraction → write patient → trigger detect.
-- Patient update: staged confirmation state machine → confirm → trigger detect with domain hint.
-- Full FastAPI REST surface: patients, actions, caregivers, scheduling, notifications, ingest, org.
+## ASI:One Overdue Signaling
 
-### API Contract
-All endpoints return `{"success": true, "data": ...}` or `{"success": false, "error": "..."}`.
+ASI:One is actively used as an overdue escalation channel in this implementation.
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/actions?sort=rank` | List pending actions sorted by urgency score |
-| PATCH | `/actions/{id}` | Submit modification instruction or mark reviewed |
-| POST | `/actions/{id}/chat` | Send chat message to assistant |
-| GET | `/actions/{id}/chat-history` | Fetch chat history |
-| GET | `/patients` | Enriched patient list (pending counts, urgency) |
-| GET | `/patients/{id}` | Full patient detail with life graph |
-| POST | `/patients/{id}/update` | Propose update (staged) |
-| POST | `/patients/{id}/update/{uid}/confirm` | Confirm staged update |
-| GET | `/patients/{id}/update-history` | Update history log |
-| POST | `/ingest/text` | Ingest free-form patient text |
-| POST | `/ingest/file` | Ingest PDF or image file |
-| GET | `/caregivers` | List caregivers with availability |
-| GET | `/caregivers/{id}/schedule` | 14-day schedule grid |
-| GET | `/caregivers/{id}/assignments` | Assignment list |
-| POST | `/scheduling/{id}/assign` | Assign caregiver → unconfirmed |
-| POST | `/scheduling/{id}/confirm` | Confirm → completed=1 |
-| POST | `/scheduling/{id}/decline` | Decline → reset to pending_approval |
-| GET | `/org` | Org profile |
-| PUT | `/org` | Update org profile |
+When the expiration pipeline detects an overdue action, the system:
+1. marks the action overdue and escalates urgency,
+2. writes a dashboard notification,
+3. sends a `ChatMessage` to the configured ASI:One care coordinator address (`ASI_ONE_AGENT_ADDRESS`),
+4. records dedup entries so each overdue action is signaled once per channel.
 
-### Dashboard (four views)
-- **Action Feed**: RTK Query polling (10s), urgency-sorted cards, OVERDUE banners, tier badges, `ActionChatPanel` slide-over (3s chat poll), `DraftModal` with idempotency key, modification-in-progress lock, scheduling deep-link.
-- **Patient Roster**: Two-column split layout, sidebar with urgency pills, life graph sections (health/appointments/grocery/financial/emergency contacts), pending actions summary, action history accordion, Add Patient modal (text + file tabs), staged update confirmation state machine, Update History tab.
-- **Caregiver Management**: Scheduling strip (pending_approval + unconfirmed actions), assignment dropdowns, Confirm/Decline buttons, caregiver detail panel, 14-day schedule grid, assignment list, deep-link preselect from Action Feed.
-- **Org Dashboard**: Org summary panel, four metric cards (total pending, total overdue, 30-day completion rate, avg urgency score), protocol cards, caregiver roster table, Edit Org Profile form.
+For immediate validation (without waiting for the 15-minute interval), use:
+- `POST /internal/expiration-check` with `{"force_overdue": true}`.
 
-### Test Coverage
-- Backend integration tests: patient update pipeline, file ingest, executor fan-out logic.
-- Domain detection unit tests: health, appointment, grocery, financial — parse pipeline with deterministic seed data.
-- Scheduling E2E tests: assign → unconfirmed → confirm/decline status transitions.
-- Expiration loop tests: dedup notification per channel, overdue marking.
-- Dashboard E2E tests (Playwright): all four views, critical UX flows.
+---
 
-## Run Instructions (Sprint 1 Operations)
+## What The System Does
 
-### 1. Clone and enter repo
+### 1. Multi-layer autonomous orchestration
+- **Executor agent** performs intent classification and routing.
+- **Domain supervisors/workers** (health, appointment, grocery, financial) generate and refine actions.
+- **Scheduling agent** manages assignment state transitions and caregiver availability workflows.
+
+### 2. Ingestion flows that queue autonomous tasks
+- Free-text and file-based patient ingestion (`/ingest/text`, `/ingest/file`).
+- Staged patient updates with explicit confirm step (`/patients/{id}/update/.../confirm`).
+- Confirmed updates trigger detection fan-out and action creation.
+
+### 3. Autonomous + manual task support
+- Actions are persisted in `action_history` with urgency, domain, lifecycle state, and execution payload context.
+- Manual/scheduling actions include caregiver-facing instructions and schedule windows used by caregiver roster tooling.
+- Approvals execute route-backed automations where payload requirements are satisfied.
+
+### 4. Urgency and overdue lifecycle
+- Urgency tiers (`tier_0`..`tier_3`) plus domain weighting support global ranking.
+- Expiration loop marks actions overdue and emits deduped notifications.
+- Overdue alerts are sent to:
+  - dashboard notification feed,
+  - ASI:One target address (when `ASI_ONE_AGENT_ADDRESS` is configured).
+
+### 5. Explainability and assistant interfaces
+- **Task-scoped chat:** `/actions/{action_id}/chat` and `/actions/{action_id}/chat-history`.
+- **General org/patient chat:** `/chat` session pipeline backed by executor `/general-chat`.
+- Supports question answering, draft-action generation, and draft revision/approval flows.
+
+### 6. Modification scope
+- Health-domain action modification is supported in production flow.
+- Non-health domain modification is intentionally out-of-scope in current policy config.
+
+---
+
+## Staging Actions From Chat
+
+Caregivers can request new actions directly in the general chat interface. Those requests are
+staged first, then explicitly approved into `action_history`.
+
+Staging flow:
+1. Send message to `POST /chat` with no `session_id` to open a new chat session.
+2. Continue the conversation in the same `session_id` until the assistant returns `stage: "draft_ready"` and a `draft_action_id`.
+3. Optional: revise draft with `POST /chat/action/{draft_action_id}/modify`.
+4. Approve draft with `POST /chat/action/{draft_action_id}/approve` to commit it as a real action.
+5. Or discard with `POST /chat/action/{draft_action_id}/discard`.
+
+Example:
 ```bash
-git clone <your-repo-url>
-cd Autocare
+# 1) Create session + request a new action
+RESP=$(curl -s -X POST http://localhost:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message":"Create a health follow-up action for Dorothy Kim to check medication adherence this week."}')
+echo "$RESP" | python3 -m json.tool
+
+SESSION_ID=$(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['session_id'])")
+
+# 2) Continue chat (if clarification is requested)
+curl -s -X POST http://localhost:8000/chat \
+  -H "Content-Type: application/json" \
+  -d "{\"session_id\":\"${SESSION_ID}\",\"message\":\"Yes, that is correct. Make it urgent tier_1.\"}" | python3 -m json.tool
+
+# 3) Get draft_action_id from history
+HIST=$(curl -s "http://localhost:8000/chat/history?session_id=${SESSION_ID}")
+echo "$HIST" | python3 -m json.tool
+DRAFT_ACTION_ID=$(echo "$HIST" | python3 -c 'import sys,json; msgs=json.load(sys.stdin)["data"]; print(next((m.get("draft_action_id") for m in reversed(msgs) if m.get("draft_action_id")), ""))')
+
+# 4) Optional modify
+curl -s -X POST "http://localhost:8000/chat/action/${DRAFT_ACTION_ID}/modify" \
+  -H "Content-Type: application/json" \
+  -d '{"feedback":"Add explicit caregiver check-in instructions and include blood glucose note."}' | python3 -m json.tool
+
+# 5) Approve staged draft into action_history
+curl -s -X POST "http://localhost:8000/chat/action/${DRAFT_ACTION_ID}/approve" | python3 -m json.tool
 ```
 
-### 2. Set up Python environment
+After approval, the new action appears in `/actions` and in the dashboard feeds.
+
+---
+
+## End-to-End Runtime Flow
+
+1. Data enters through ingest/update endpoints.
+2. Executor receives trigger and selects detection fan-out path.
+3. Domain workers emit action drafts with urgency, instructions, and optional automation payload templates.
+4. Actions appear in Action Feed and Patient/Caregiver views.
+5. Caregiver can:
+- approve,
+- dismiss,
+- assign/confirm scheduling,
+- ask scoped questions,
+- request modification (health domain).
+6. Approval executes automation calls (mock APIs and optional integrations), stores execution result, and updates lifecycle state.
+7. Expiration loop escalates overdue work and emits deduped notifications (dashboard + ASI:One).
+
+---
+
+## Key Interfaces
+
+### Core REST APIs (FastAPI)
+- `GET /actions?sort=rank|created_at`
+- `GET /actions/{id}`
+- `PATCH /actions/{id}`
+- `POST /actions/{id}/approve`
+- `POST /actions/{id}/complete`
+- `POST /actions/{id}/dismiss`
+- `POST /actions/{id}/chat`
+- `GET /actions/{id}/chat-history`
+
+- `GET /patients`
+- `GET /patients/{id}`
+- `POST /patients`
+- `PUT /patients/{id}`
+- `POST /patients/{id}/update`
+- `POST /patients/{id}/update/file`
+- `POST /patients/{id}/update/{update_id}/confirm`
+- `GET /patients/{id}/update-history`
+
+- `POST /ingest/text`
+- `POST /ingest/file`
+
+- `GET /caregivers`
+- `GET /caregivers/{id}/schedule`
+- `GET /caregivers/{id}/assignments`
+
+- `POST /scheduling/{action_id}/assign`
+- `POST /scheduling/{action_id}/confirm`
+- `POST /scheduling/{action_id}/decline`
+
+- `GET /org`
+- `PUT /org`
+- `PATCH /org`
+
+- `GET /notifications`
+- `POST /notifications/{id}/read`
+
+- `POST /chat` (general assistant)
+- `GET /chat/history`
+- `POST /chat/action/{draft_action_id}/approve`
+- `POST /chat/action/{draft_action_id}/modify`
+- `POST /chat/action/{draft_action_id}/discard`
+
+### Executor internal endpoints
+- `POST /internal/detect` — trigger detection fan-out.
+- `POST /internal/expiration-check` — one-shot overdue pass (optional forced-overdue action) to invoke alert path immediately.
+
+### Mock automation routes
+- `POST /mock/cvs/refill`
+- `POST /mock/cal/book`
+- `POST /mock/instacart/cart`
+- `POST /mock/amazon/order`
+- `POST /mock/amazon/reorder`
+- `POST /mock/caregivers/available`
+
+---
+
+## Dashboard Surfaces
+
+- **Action Feed**
+- urgency-ranked actions, approval/dismiss controls, task chat, execution visibility.
+
+- **Patient Roster**
+- patient-centric profile + life-graph context + pending/history actions.
+
+- **Caregiver Management**
+- assignment controls, scheduling states, caregiver availability and 14-day grid.
+
+- **Org Dashboard**
+- org profile summary, operational metrics, protocol context, caregiver roster view.
+
+---
+
+## Overdue + ASI:One Auto-Flagger
+
+When the expiration pass runs:
+1. pending actions with `review_by < now` are marked overdue,
+2. urgency escalates (`tier_0` path),
+3. dashboard notification is written,
+4. ASI:One alert is sent via `ctx.send(ASI_ONE_AGENT_ADDRESS, ChatMessage)` when configured,
+5. dedup entries are persisted in `expiration_notifications` per channel.
+
+This guarantees one alert per channel per action unless state is explicitly reset.
+
+---
+
+## Local Setup
+
+### Prerequisites
+- Python 3.11+
+- Node 18+
+- `pip`, `npm`
+
+### 1) Install dependencies
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+
+cd dashboard
+npm install
+cd ..
 ```
 
-If you hit a `pydantic_core` architecture mismatch on macOS (Apple Silicon), recreate using arm64:
-```bash
-arch -arm64 python3 -m venv --clear .venv
-arch -arm64 .venv/bin/python -m pip install -r requirements.txt
-source .venv/bin/activate
-```
-
-### 3. Configure environment
+### 2) Configure environment
 ```bash
 cp .env.example .env
 ```
 
-For local Sprint 1 scaffold checks, set at minimum:
+Required runtime vars for full stack:
 - `SQLITE_DB_PATH=data/life_graph.db`
 - `EXECUTOR_INTERNAL_URL=http://localhost:8001`
 - `MOCK_API_BASE=http://localhost:8000`
 
-Optional for mailbox/chat integration on Agentverse/ASI:One:
-- Agent seed phrases and registered addresses.
-- `AGENTVERSE_API_KEY`.
+Optional for ASI:One overdue alerts:
+- `ASI_ONE_AGENT_ADDRESS=agent1q...`
 
-### 4. Seed and verify DB baseline
+### 3) Seed deterministic data
 ```bash
-python data/seed.py
-python -c "import sqlite3; con=sqlite3.connect('data/life_graph.db');
-print('org_profile', con.execute('select count(*) from org_profile').fetchone()[0]);
-print('patients', con.execute('select count(*) from patients').fetchone()[0]);
-print('caregivers', con.execute('select count(*) from caregivers').fetchone()[0]);
-print('caregiver_schedule', con.execute('select count(*) from caregiver_schedule').fetchone()[0]);
-print('overdue_actions', con.execute('select count(*) from action_history where is_overdue=1').fetchone()[0]);
-con.close()"
+source .venv/bin/activate
+python3 data/seed.py
 ```
 
-Expected counts:
-- `org_profile = 1`
-- `patients = 3`
-- `caregivers = 10`
-- `caregiver_schedule = 140`
-- `overdue_actions = 1`
-
-### 5. Foundation compile check
+### 4) Start backend + agents
 ```bash
-python -m compileall agents api data -q
+source .venv/bin/activate
+SQLITE_DB_PATH=data/life_graph.db \
+EXECUTOR_INTERNAL_URL=http://localhost:8001 \
+MOCK_API_BASE=http://localhost:8000 \
+python3 -m agents.run_all
 ```
 
-### 6. Run API scaffold
+### 5) Start frontend
 ```bash
-python -m uvicorn api.main:app --host 0.0.0.0 --port 8000
+cd dashboard
+npm run dev
 ```
 
-In another terminal:
+Open:
+- API: `http://localhost:8000`
+- Executor: `http://localhost:8001`
+- Dashboard: `http://localhost:5173`
+
+---
+
+## Quick Validation
+
+### Health check
 ```bash
 curl -s http://127.0.0.1:8000/health
 ```
 
-Expected response:
-```json
-{"status":"ok"}
+### Seed sanity check
+```bash
+python3 - <<'PY'
+import sqlite3
+con = sqlite3.connect('data/life_graph.db')
+for q, name in [
+    ('select count(*) from org_profile', 'org_profile'),
+    ('select count(*) from patients', 'patients'),
+    ('select count(*) from caregivers', 'caregivers'),
+    ('select count(*) from action_history', 'actions')
+]:
+    print(name, con.execute(q).fetchone()[0])
+con.close()
+PY
 ```
 
-### 7. Run full Sprint 1 agent stack
+### Force immediate overdue pass (no 15-minute wait)
 ```bash
-SQLITE_DB_PATH=data/life_graph.db \
-EXECUTOR_INTERNAL_URL=http://localhost:8001 \
-MOCK_API_BASE=http://localhost:8000 \
-python -m agents.run_all
-```
-
-### 8. Run executor routing smoke call
-In another terminal while the stack is running:
-```bash
-curl -s -X POST http://127.0.0.1:8001/message \
+curl -s -X POST http://localhost:8001/internal/expiration-check \
   -H "Content-Type: application/json" \
-  -d '{"content":"health refill test"}'
+  -d '{"force_overdue": true}'
 ```
 
-Expected behavior:
-- Executor classifies and routes to health supervisor.
-- Health supervisor forwards to health worker.
-- Worker responds; supervisor returns to executor.
-- Executor completes request lifecycle.
+---
 
-### 9. Optional: direct chat pipeline test
-```bash
-python test_chat_direct.py
+## Repository Layout (Current)
+
+```text
+agents/
+  executor/agent.py
+  health/{supervisor.py,worker.py}
+  appointment/{supervisor.py,worker.py}
+  grocery/{supervisor.py,worker.py}
+  financial/{supervisor.py,worker.py}
+  scheduling/agent.py
+  shared/{config.py,constants.py,db.py,llm.py,models.py,notifications.py,state_service.py}
+  run_all.py
+
+api/
+  main.py
+  routers/{actions.py,caregivers.py,chat.py,ingest.py,notifications.py,org.py,patients.py,scheduling.py}
+  mock_apis/router.py
+
+dashboard/
+  src/{api,components,types,utils,views}
+  e2e/
+
+data/
+  schema.sql
+  seed.py
+  life_graph.db (generated)
+
+demo/
+  README.md
+  payloads/
+  uploads/
+
+tests/
+  integration/
+  test_*.py
 ```
 
-This sends a signed chat envelope to the executor path for local chat-flow verification.
+---
 
-## Primary References
-- `MACOS_build_spec_v7_final.md`
-- `CLAUDE.md`
-- `openspec/changes/archive/2026-04-25-implement-sprint-1-foundation/`
+## Notes
+- This repo is intentionally agent-first and event-driven.
+- Detection and action generation quality depends on runtime model configuration and available context.
+- Automation execution requires valid action payload templates; route preflight errors are surfaced in action execution plans.
+- Current modification policy is intentionally limited to health-domain workflows.

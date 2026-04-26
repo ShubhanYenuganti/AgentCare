@@ -1,51 +1,50 @@
 # Executor Agent
 
-The **Executor** is the central orchestrator of the Autocare multi-agent system. It is the single entry point for all incoming queries — whether from a REST API call or from an Agentverse chat session.
+The executor is the orchestration boundary for Autocare.
+It receives requests from API/chat surfaces, classifies intent, dispatches to domain supervisors, aggregates responses, and runs background health/expiration loops.
 
-## What it does
+## Runtime role
+- Classifies incoming requests into `detection`, `question`, or `modification`.
+- Resolves patient context for routing.
+- Fans out detection to domain supervisors (`health`, `appointment`, `grocery`, `financial`).
+- Routes task-scoped question/modification requests to the selected domain supervisor.
+- Supports general chat drafting via `/general-chat` and revision via `/general-chat/revise`.
+- Runs expiration escalation loop (dashboard + ASI:One channels with dedup).
 
-- Accepts free-text queries via:
-  - `POST /message` (REST endpoint, body: `{"content": "<query>"}`)
-  - Agentverse chat messages (via the `executor-chat` protocol)
-- Classifies each query into one of five domains using keyword matching:
+## HTTP endpoints (port 8001)
+- `GET /health`
+- `POST /message`
+- `POST /general-chat`
+- `POST /general-chat/revise`
+- `POST /internal/detect`
+- `POST /internal/expiration-check`
+- `GET /mailbox-debug`
 
-  | Domain | Keywords |
-  |---|---|
-  | `health` | health, medication, pharmacy, refill, dose |
-  | `appointment` | appointment, clinic, doctor, transport, visit |
-  | `grocery` | grocery, food, delivery, diet, instacart |
-  | `financial` | financial, bill, payment, autopay, invoice |
-  | `scheduling` | schedule, availability, caregiver, slot |
+## Detection fan-out contract
+Inbound: `OnDemandDetectionRequest` (internal trigger path) or executor-built fan-out payload.
+Outbound per domain: `OnDemandDetectionRequest` to supervisor.
+Return path: supervisors send `SupervisorResult`; executor finalizes fan-out state.
 
-- Routes a `MockDomainTask` to the appropriate domain supervisor.
-- Tracks pending requests in memory via `request_state`.
-- Receives a `MockSupervisorResult` from the supervisor and returns the final answer to the caller.
+## Question/Modification routing
+- Question path: `QuestionRequest` -> domain supervisor -> `QuestionAnswer`.
+- Modification path: `ModificationRequest` -> domain supervisor -> `ModificationResult`.
+- Current policy from shared constants: modification is enabled for health domain workflows.
 
-## Endpoints
+## Expiration + overdue pipeline
+- Interval job: every 900s.
+- Overdue criteria: pending action with `review_by < now` and `is_overdue=0`.
+- Effects:
+  - marks action overdue,
+  - writes dashboard notification,
+  - sends ASI:One `ChatMessage` if `ASI_ONE_AGENT_ADDRESS` is configured,
+  - logs channel dedup in `expiration_notifications`.
+- Immediate trigger endpoint: `POST /internal/expiration-check` (supports optional forced-overdue action).
 
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/health` | Liveness check — returns `{"status": "ok healthy"}` |
-| `POST` | `/message` | Submit a free-text query for routing |
-
-## Message flow
-
-```
-User / API  →  Executor  →  Domain Supervisor  →  Domain Worker
-                  ↑                                      |
-                  └──────────  MockSupervisorResult  ────┘
-```
-
-## Port
-
-`8001`
-
-## Protocols
-
-- `executor-chat` — handles `ChatMessage` / `ChatAcknowledgement` from Agentverse
+## Protocol integration
+- Chat protocol (`executor-chat`) is enabled for Agentverse mailbox ingress.
+- Uses `LocalFirstResolver` for low-latency intra-stack routing, falls back to global resolver for external addresses.
 
 ## Running
-
-```
+```bash
 python -m agents.executor.agent
 ```

@@ -13,8 +13,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.mock_apis import router as mock_router
-from api.routers import actions, caregivers, ingest, notifications, org, patients, scheduling
-from agents.shared.db import init_db
+from api.routers import actions, caregivers, chat, ingest, notifications, org, patients, scheduling
+from agents.shared.db import expire_old_staged_actions, init_db
 
 app = FastAPI(title="MACOS API Scaffold")
 
@@ -22,6 +22,7 @@ app = FastAPI(title="MACOS API Scaffold")
 @app.on_event("startup")
 async def startup():
     init_db()
+    expire_old_staged_actions()
 
 _dashboard_origin = os.getenv("DASHBOARD_ORIGIN", "http://localhost:5173")
 _cors_origins_env = os.getenv("CORS_ORIGINS", "")
@@ -37,6 +38,7 @@ app.add_middleware(
 )
 app.include_router(actions.router)
 app.include_router(caregivers.router)
+app.include_router(chat.router)
 app.include_router(ingest.router)
 app.include_router(notifications.router)
 app.include_router(org.router)

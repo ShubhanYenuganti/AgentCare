@@ -1,4 +1,4 @@
-// Shared TypeScript interfaces for MACOS Dashboard API responses
+// Shared TypeScript interfaces for AgentCare dashboard API responses
 
 export interface LifeGraph {
   health?: {
@@ -205,4 +205,37 @@ export interface PatientUpdate {
   proposed_changes?: Record<string, unknown>;
   domain?: string;
   summary?: string;
+  /** True when row was written by /ingest audit (file or text), not the staged /update flow */
+  fromIngest?: boolean;
+}
+
+// General chat session types
+export interface GeneralChatMessage {
+  id: number;
+  role: "user" | "agent";
+  content: string;
+  stage?: string;
+  intent_class?: string | null;
+  domain?: string | null;
+  patient_ids?: string[];
+  draft_action_id?: string | null;
+  created_at?: string;
+}
+
+export interface SendMessageResponse {
+  session_id: string;
+  reply: string;
+  stage: string;
+  draft_action_id?: string | null;
+  intent_class?: string | null;
+  domain?: string | null;
+}
+
+export interface StagedActionDraft {
+  patient_id?: string;
+  domain?: string;
+  type?: string;
+  description?: string;
+  schedule?: Record<string, unknown>;
+  [key: string]: unknown;
 }

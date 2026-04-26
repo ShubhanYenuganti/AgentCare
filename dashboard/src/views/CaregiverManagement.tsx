@@ -1,5 +1,5 @@
 import { useLayoutEffect, useRef, useState, type CSSProperties } from "react";
-import { formatTimeRangeLocal } from "../utils/formatActionDate";
+import { formatTimeRangeLocal, formatWallTimeRangeToAmPm, formatWallTimeToAmPm } from "../utils/formatActionDate";
 import { useLocation, useNavigate } from "react-router-dom";
 import {
   useGetActionsQuery,
@@ -233,19 +233,20 @@ function deriveSlotStatus(slot: CaregiverScheduleSlot): "available" | "booked" |
   return "available";
 }
 
-function stripHms(t: string): string {
-  const m = t.trim().match(/^(\d{1,2}:\d{2})(?::\d{2})?/);
-  return m ? m[1]! : t.trim();
-}
-
-/** Prefer explicit `shift`; else format DB `start_time` / `end_time` (e.g. seed `08:00`–`16:00`), or "Off" when not working. */
+/** Prefer explicit `shift` (e.g. "09:00–17:00"); else DB `start_time` / `end_time` in local 12h, or "Off". */
 function formatSlotShiftLabel(slot: CaregiverScheduleSlot): string {
-  if (slot.shift) return slot.shift;
+  if (slot.shift) {
+    const parts = slot.shift.split(/\s*[–-]\s*/);
+    if (parts.length === 2 && parts[0] && parts[1]) {
+      return formatWallTimeRangeToAmPm(parts[0]!.trim(), parts[1]!.trim());
+    }
+    return slot.shift;
+  }
   const s = slot.start_time?.trim();
   const e = slot.end_time?.trim();
-  if (s && e) return `${stripHms(s)}–${stripHms(e)}`;
+  if (s && e) return formatWallTimeRangeToAmPm(s, e);
   if (!s && !e) return "Off";
-  return stripHms(s || e || "—");
+  return formatWallTimeToAmPm(s || e || "—");
 }
 
 function ScheduleLegend() {

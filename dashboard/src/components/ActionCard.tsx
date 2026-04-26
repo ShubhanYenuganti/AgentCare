@@ -1,7 +1,7 @@
 import { useState, useEffect, type CSSProperties } from "react";
 import { useNavigate } from "react-router-dom";
 import type { Action, ExecutionPlanStep } from "../types";
-import { formatReviewByLocal } from "../utils/formatActionDate";
+import { formatLocal, formatReviewByLocal } from "../utils/formatActionDate";
 import { canonicalAutomationRoute, formatAutomationStepTitle } from "../utils/automationStepLabels";
 import { urgencyDisplayLabel } from "../utils/urgencyLabels";
 import { useApproveActionMutation, useDismissActionMutation } from "../api/client";
@@ -15,6 +15,17 @@ interface Props {
   readOnly?: boolean;
   /** Emphasize this card (e.g. when deep-linked from the patient view). */
   highlighted?: boolean;
+}
+
+function formatApprovalPayloadText(action: Action): string {
+  const raw = action.api_payload;
+  if (raw == null) return "No execution payload was stored for this action.";
+  if (typeof raw !== "object") return String(raw);
+  const o = raw as Record<string, unknown>;
+  if ("approval_execution" in o && o.approval_execution != null) {
+    return JSON.stringify(o.approval_execution, null, 2);
+  }
+  return JSON.stringify(raw, null, 2);
 }
 
 const URGENCY: Record<string, { accent: string; labelBg: string; labelText: string }> = {
@@ -217,6 +228,192 @@ export default function ActionCard({ action, readOnly = false, highlighted = fal
 
   const showEmailInbox = isEmailAction;
   const showPlainDraftBlock = Boolean(action.draft_content) && !isEmailAction;
+
+  /** No caregiver scheduling step → approve runs automation only; if `manual_action_type` is set, user must use Schedule (caregivers) first. */
+  const isAutonomous = !String(action.manual_action_type ?? "").trim();
+  const isCompletedAutonomous = action.completed === 1 && isAutonomous && action.outcome === "approved";
+  const showSchedule =
+    action.completed === 0 && !action.assigned_caregiver && Boolean(action.manual_action_type);
+  const showApprove = isAutonomous;
+  const completedAccent = "#059669";
+  const payloadText = formatApprovalPayloadText(action);
+
+  if (isCompletedAutonomous) {
+    return (
+      <>
+        <div
+          data-testid="action-card"
+          data-completed="true"
+          id={`action-focus-${action.action_id}`}
+          style={{
+            ...glass,
+            background: "linear-gradient(180deg, #f8fafc 0%, #f0fdf4 100%)",
+            borderColor: "rgba(5, 150, 105, 0.25)",
+            ...(highlighted
+              ? {
+                  boxShadow: "0 0 0 3px rgba(59, 130, 246, 0.45), 0 4px 18px rgba(0, 0, 0, 0.08)",
+                }
+              : {}),
+          }}
+        >
+          <div
+            data-testid="automation-completed-banner"
+            style={{
+              textAlign: "center",
+              fontSize: "0.65rem",
+              fontWeight: 700,
+              letterSpacing: "0.2em",
+              padding: "8px 0",
+              background: "rgba(167, 243, 208, 0.5)",
+              color: "#14532d",
+              borderBottom: "1px solid rgba(5, 150, 105, 0.25)",
+            }}
+          >
+            COMPLETED — Automation ran
+          </div>
+          <div
+            style={{
+              padding: "1.1rem 1.2rem 1.15rem",
+              borderLeft: `4px solid ${completedAccent}`,
+            }}
+          >
+            <div
+              style={{
+                display: "flex",
+                flexWrap: "wrap",
+                alignItems: "flex-start",
+                justifyContent: "space-between",
+                gap: "0.6rem",
+                marginBottom: "0.75rem",
+              }}
+            >
+              <div style={{ display: "flex", flexWrap: "wrap", gap: "0.4rem", alignItems: "center" }}>
+                <span
+                  style={{
+                    backgroundColor: `${domainColor}18`,
+                    color: domainColor,
+                    fontSize: "0.65rem",
+                    fontWeight: 700,
+                    letterSpacing: "0.1em",
+                    textTransform: "uppercase" as const,
+                    padding: "0.2rem 0.45rem",
+                    borderRadius: 6,
+                  }}
+                >
+                  {action.domain}
+                </span>
+                <span
+                  style={{
+                    backgroundColor: u.labelBg,
+                    color: u.labelText,
+                    fontSize: "0.65rem",
+                    fontWeight: 700,
+                    padding: "0.2rem 0.5rem",
+                    borderRadius: 6,
+                    letterSpacing: "0.02em",
+                  }}
+                >
+                  {urgencyDisplayLabel(action.urgency_level)}
+                </span>
+                <span
+                  style={{
+                    backgroundColor: "rgba(5, 150, 105, 0.15)",
+                    color: "#14532d",
+                    fontSize: "0.65rem",
+                    fontWeight: 700,
+                    padding: "0.2rem 0.5rem",
+                    borderRadius: 6,
+                    letterSpacing: "0.12em",
+                  }}
+                >
+                  Autonomous
+                </span>
+              </div>
+              {action.patient_name && (
+                <div style={{ textAlign: "right", minWidth: "min(100%, 200px)" }}>
+                  <div style={{ fontSize: "0.65rem", fontWeight: 600, letterSpacing: "0.1em", color: "#4b5563" }}>Patient</div>
+                  <div style={{ fontSize: "0.95rem", fontWeight: 700, color: "#0a0a0a" }}>{action.patient_name}</div>
+                </div>
+              )}
+            </div>
+
+            <p
+              style={{
+                margin: "0 0 0.5rem",
+                fontSize: "1rem",
+                fontWeight: 600,
+                lineHeight: 1.45,
+                color: "#0a0a0a",
+              }}
+            >
+              {action.description}
+            </p>
+            <p style={{ margin: "0 0 0.85rem", fontSize: "0.82rem", color: "#4b5563" }}>
+              Completed <span style={{ color: "#0a0a0a", fontWeight: 500 }}>{formatLocal(action.completion_date)}</span>
+            </p>
+
+            {showPlainDraftBlock && (
+              <div style={section}>
+                <div style={sectionLabel}>Action draft (at time of run)</div>
+                <p style={{ ...mono, maxHeight: "120px" }}>{action.draft_content}</p>
+              </div>
+            )}
+
+            <div style={{ ...section, marginTop: "0.75rem" }}>
+              <div style={sectionLabel}>Execution result (returned payload)</div>
+              <textarea
+                readOnly
+                value={payloadText}
+                aria-label="Execution result payload"
+                rows={14}
+                style={{
+                  width: "100%",
+                  minHeight: "12rem",
+                  boxSizing: "border-box",
+                  resize: "vertical" as const,
+                  margin: 0,
+                  padding: "0.6rem 0.75rem",
+                  fontSize: "0.78rem",
+                  lineHeight: 1.45,
+                  color: "#0f172a",
+                  background: "rgba(255, 255, 255, 0.9)",
+                  border: "1px solid rgba(5, 150, 105, 0.25)",
+                  borderRadius: 10,
+                  fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+                  boxShadow: "inset 0 1px 1px rgba(15, 23, 42, 0.05)",
+                }}
+              />
+            </div>
+
+            {readOnly && (
+              <div style={{ display: "flex", justifyContent: "flex-end", marginTop: "1rem" }}>
+                <button
+                  type="button"
+                  onClick={() =>
+                    navigate(
+                      { pathname: "/actions", search: `?action=${encodeURIComponent(action.action_id)}` },
+                      { state: { highlightActionId: action.action_id } }
+                    )
+                  }
+                  data-testid="open-in-feed-btn"
+                  style={{
+                    padding: "0.45rem 1rem",
+                    ...BTN_BLUE,
+                    borderRadius: "9999px",
+                    cursor: "pointer",
+                    fontSize: "0.8rem",
+                    fontWeight: 600,
+                  }}
+                >
+                  Open in Action Feed
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      </>
+    );
+  }
 
   return (
     <>
@@ -475,26 +672,7 @@ export default function ActionCard({ action, readOnly = false, highlighted = fal
                 </button>
               )}
 
-              <button
-                onClick={() => approveAction(action.action_id)}
-                disabled={actionPending}
-                data-testid="approve-btn"
-                type="button"
-                style={actionPending ? BTN_ROW_DISABLED : BTN_ROW_APPROVE}
-              >
-                {approving ? "Approving…" : "Approve"}
-              </button>
-              <button
-                onClick={() => dismissAction(action.action_id)}
-                disabled={actionPending}
-                data-testid="dismiss-btn"
-                type="button"
-                style={actionPending ? BTN_ROW_DISABLED : BTN_ROW_DISMISS}
-              >
-                {dismissing ? "Dismissing…" : "Dismiss"}
-              </button>
-
-              {action.completed === 0 && !action.assigned_caregiver && Boolean(action.manual_action_type) && (
+              {showSchedule && (
                 <button
                   onClick={() => navigate(`/caregivers?action_id=${encodeURIComponent(action.action_id)}`)}
                   data-testid="schedule-task-btn"
@@ -504,6 +682,28 @@ export default function ActionCard({ action, readOnly = false, highlighted = fal
                   Schedule Task
                 </button>
               )}
+
+              {showApprove && (
+                <button
+                  onClick={() => approveAction(action.action_id)}
+                  disabled={actionPending}
+                  data-testid="approve-btn"
+                  type="button"
+                  style={actionPending ? BTN_ROW_DISABLED : BTN_ROW_APPROVE}
+                >
+                  {approving ? "Approving…" : "Approve"}
+                </button>
+              )}
+
+              <button
+                onClick={() => dismissAction(action.action_id)}
+                disabled={actionPending}
+                data-testid="dismiss-btn"
+                type="button"
+                style={actionPending ? BTN_ROW_DISABLED : BTN_ROW_DISMISS}
+              >
+                {dismissing ? "Dismissing…" : "Dismiss"}
+              </button>
             </div>
           )}
 

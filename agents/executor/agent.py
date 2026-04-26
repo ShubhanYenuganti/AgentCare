@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -21,6 +21,7 @@ from uagents_core.contrib.protocols.chat import (
 )
 
 from agents.shared.config import (
+    ASI_ONE_AGENT_ADDRESS,
     EXECUTOR_SEED,
     LocalFirstResolver,
     SUPERVISOR_ADDRESS_BY_DOMAIN,
@@ -29,9 +30,12 @@ from agents.shared.constants import AGENT_PORTS, DOMAIN_KEYWORDS, ORG_CONTEXT_MA
 from agents.shared.db import (
     find_active_patients_by_name_query,
     get_action,
+    get_action_rankings,
+    get_all_patients,
     get_org_profile,
     get_overdue_actions,
     get_patient,
+    get_pending_actions,
     has_been_notified,
     log_expiration_notification,
     mark_action_overdue,
@@ -40,6 +44,7 @@ from agents.shared.db import (
     write_chat_message,
     write_notification,
     write_patient,
+    write_staged_action,
 )
 from agents.shared.llm import call_claude, call_claude_json
 from agents.shared.models import (
@@ -146,6 +151,56 @@ class InternalDetectResponse(Model):
     status: str
     patient_id: str
     trigger: str
+
+
+class InternalExpirationCheckRequest(Model):
+    force_overdue: bool = False
+    action_id: str | None = None
+
+
+class InternalExpirationCheckResponse(Model):
+    status: str
+    forced_action_id: str | None = None
+    overdue_found: int = 0
+    alerts_sent_dashboard: int = 0
+    alerts_sent_asi_one: int = 0
+
+
+class GeneralChatMessage(Model):
+    id: int | None = None
+    role: str
+    content: str
+    stage: str = ""
+    intent_class: str | None = None
+    domain: str | None = None
+    patient_ids: list[str] | None = None
+    draft_action_id: str | None = None
+    created_at: str | None = None
+
+
+class GeneralChatRequest(Model):
+    session_id: str
+    messages: list[GeneralChatMessage]
+
+
+class GeneralChatResponse(Model):
+    reply: str
+    stage: str
+    draft_action_id: str | None = None
+    intent_class: str | None = None
+    domain: str | None = None
+    patient_ids: list[str] | None = None
+
+
+class ReviseRequest(Model):
+    original_draft: dict[str, Any]
+    feedback: str
+    session_id: str
+
+
+class ReviseResponse(Model):
+    revised_draft: dict[str, Any] | None = None
+    reply: str
 
 
 # ---------------------------------------------------------------------------
@@ -937,6 +992,441 @@ async def _handle_dispatch_error(
 # REST endpoints
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# General-chat pipeline
+# ---------------------------------------------------------------------------
+
+_GENERAL_CHAT_CLASSIFY_PROMPT = """\
+You are an intent classifier for MACOS, a care-coordination assistant.
+
+Classify the final user message in the conversation into ONE of:
+  question     – the user wants information (no new action needed)
+  create-action – the user wants to initiate a new care action or task
+
+Also extract:
+  domain – the most relevant care domain: "health", "appointment", "grocery", or "financial"
+           (use your best judgement from context; default to "health" if unclear)
+  confidence – "high" or "low"
+  needs_db_query – true if the question can be answered from structured records (actions,
+                   schedules, patient profiles, task lists, urgency/priority, overdue status)
+                   WITHOUT requiring clinical or domain-specific expertise.
+                   false if the question needs domain knowledge (e.g. medication interactions,
+                   clinical assessment, dietary advice, financial planning advice).
+                   Always true for questions about: pending/unresolved actions, urgent tasks,
+                   overdue items, patient summaries, schedules, or anything phrased as
+                   "what does X have", "what is outstanding", "what needs to be done".
+                   Only false for: "is this medication safe?", "what diet is best for X?", etc.
+
+Respond with ONLY valid JSON, no prose:
+{
+  "intent": "question|create-action",
+  "domain": "health|appointment|grocery|financial",
+  "confidence": "high|low",
+  "needs_db_query": true|false
+}
+"""
+
+_PATIENT_RESOLVE_PROMPT = """\
+You are a patient name extractor for MACOS.
+Given the conversation, extract the full name(s) of any patients mentioned.
+Return ONLY a JSON object: {"names": ["Full Name 1", "Full Name 2"]}
+If no patient name is clearly mentioned, return {"names": []}.
+"""
+
+_CLARIFY_PROMPT = """\
+You are MACOS, a care-coordination assistant. Based on the conversation, you have classified:
+- Intent: {intent}
+- Domain: {domain}
+- Patients: {patients}
+
+Write a SHORT, warm clarification message to the caregiver (2-3 sentences) confirming your understanding:
+"I understand you want to [intent summary] in the [domain] domain for [patient name(s)].
+Is that correct? Feel free to correct me if I got anything wrong."
+
+Respond with ONLY a JSON object: {"reply": "<text>"}
+"""
+
+_CONFIRM_CHECK_PROMPT = """\
+You are checking whether the caregiver has confirmed or is correcting your assumptions.
+The caregiver said: "{message}"
+
+Respond with ONLY a JSON object:
+{
+  "confirmed": true | false,
+  "correction": "<what the caregiver wants to change, or null if confirmed>"
+}
+If the message is an affirmative (yes, correct, that's right, ok, sure, go ahead, yep), set confirmed=true.
+"""
+
+_CREATE_ACTION_PROMPT = """\
+You are a care action generator for MACOS.
+Generate a draft action based on this request.
+
+Domain: {domain}
+Patient: {patient_name} ({patient_id})
+Request: {request}
+
+Produce a JSON object for the action with these fields:
+{{
+  "patient_id": "{patient_id}",
+  "domain": "{domain}",
+  "type": "<short action type, e.g. 'appointment', 'medication_refill', 'grocery_order'>",
+  "description": "<concise description of the action, 1-2 sentences>",
+  "draft_content": "<detailed draft content for the caregiver>",
+  "urgency_level": "tier_1|tier_2|tier_3",
+  "review_by": "<ISO date string, e.g. 2026-05-03>",
+  "manual_action_type": "<null or short label if manual step required>"
+}}
+Return ONLY the JSON object.
+"""
+
+_REVISE_ACTION_PROMPT = """\
+You are a care action reviser for MACOS.
+You have an existing draft action and caregiver feedback. Produce a revised action.
+
+Original draft:
+{original_draft}
+
+Caregiver feedback: "{feedback}"
+
+Return a revised JSON object with the same fields as the original, incorporating the feedback.
+Return ONLY the JSON object.
+"""
+
+
+def _last_user_message(messages: list[dict]) -> str:
+    for m in reversed(messages):
+        if m.get("role") == "user":
+            return m.get("content") or ""
+    return ""
+
+
+def _conversation_text(messages: list[dict]) -> str:
+    parts = []
+    for m in messages:
+        role = m.get("role", "user")
+        content = m.get("content", "")
+        parts.append(f"{role.upper()}: {content}")
+    return "\n".join(parts)
+
+
+async def _classify_general_chat_intent(messages: list[dict]) -> dict:
+    conv = _conversation_text(messages)
+    try:
+        raw = await asyncio.to_thread(
+            call_claude_json, _GENERAL_CHAT_CLASSIFY_PROMPT, conv, 256
+        )
+        if raw.get("intent") in ("question", "create-action"):
+            return raw
+    except Exception:
+        pass
+    last = _last_user_message(messages).lower()
+    intent = "create-action" if any(
+        kw in last for kw in ["schedule", "create", "add", "set up", "book", "arrange", "order", "need to"]
+    ) else "question"
+    return {"intent": intent, "domain": _resolve_domain(last), "confidence": "low"}
+
+
+async def _extract_patient_names(messages: list[dict]) -> list[str]:
+    conv = _conversation_text(messages[-4:])  # last 4 messages for efficiency
+    try:
+        raw = await asyncio.to_thread(call_claude_json, _PATIENT_RESOLVE_PROMPT, conv, 256)
+        names = raw.get("names") or []
+        return [n for n in names if isinstance(n, str) and n.strip()]
+    except Exception:
+        return []
+
+
+async def _resolve_patients_from_names(names: list[str]) -> list[dict]:
+    resolved = []
+    for name in names:
+        candidates = await asyncio.to_thread(find_active_patients_by_name_query, name)
+        if candidates:
+            p = candidates[0]
+            resolved.append({"id": p["patient_id"], "name": p["name"]})
+    return resolved
+
+
+def _is_in_clarification(messages: list[dict]) -> bool:
+    """True if the last agent message had stage='clarifying'."""
+    for m in reversed(messages):
+        if m.get("role") == "agent":
+            return m.get("stage") == "clarifying"
+    return False
+
+
+def _get_clarification_context(messages: list[dict]) -> tuple[str, str, list[dict]]:
+    """Extract the last known intent/domain/patients from agent messages."""
+    for m in reversed(messages):
+        if m.get("role") == "agent" and m.get("stage") == "clarifying":
+            return (
+                m.get("intent_class") or "create-action",
+                m.get("domain") or "health",
+                [{"id": pid, "name": pid} for pid in (m.get("patient_ids") or [])],
+            )
+    return "create-action", "health", []
+
+
+async def _check_caregiver_confirmed(last_message: str) -> dict:
+    try:
+        raw = await asyncio.to_thread(
+            call_claude_json,
+            _CONFIRM_CHECK_PROMPT.format(message=last_message),
+            last_message,
+            200,
+        )
+        return raw
+    except Exception:
+        affirmatives = {"yes", "correct", "ok", "sure", "go ahead", "yep", "that's right", "yeah", "right", "confirm"}
+        if any(a in last_message.lower() for a in affirmatives):
+            return {"confirmed": True, "correction": None}
+        return {"confirmed": False, "correction": last_message}
+
+
+async def _generate_draft_action(
+    domain: str,
+    patient_id: str,
+    patient_name: str,
+    request: str,
+) -> dict[str, Any]:
+    import datetime as _dt
+    review_by = (_dt.datetime.now(tz=_dt.timezone.utc) + _dt.timedelta(days=7)).strftime("%Y-%m-%d")
+    prompt = _CREATE_ACTION_PROMPT.format(
+        domain=domain,
+        patient_id=patient_id,
+        patient_name=patient_name,
+        request=request,
+        review_by=review_by,
+    )
+    try:
+        raw = await asyncio.to_thread(call_claude_json, "You are a care action generator.", prompt, 1000)
+        # Ensure required fields
+        raw.setdefault("patient_id", patient_id)
+        raw.setdefault("domain", domain)
+        raw.setdefault("urgency_level", "tier_3")
+        raw.setdefault("review_by", review_by)
+        return raw
+    except Exception as exc:
+        return {
+            "patient_id": patient_id,
+            "domain": domain,
+            "type": "care_task",
+            "description": request[:200],
+            "draft_content": request,
+            "urgency_level": "tier_3",
+            "review_by": review_by,
+            "manual_action_type": None,
+            "_generation_error": str(exc),
+        }
+
+
+def _validate_draft(draft: dict) -> list[str]:
+    required = ["patient_id", "domain", "type", "description"]
+    return [f for f in required if not draft.get(f)]
+
+
+async def _fetch_question_context(patient_ids: list[str], domain: str | None) -> dict:
+    """Build a structured context dict from DB for answering data-centric questions."""
+    context: dict = {}
+
+    if patient_ids:
+        # Per-patient pending actions and life graph
+        context["patients"] = []
+        for pid in patient_ids:
+            pending = await asyncio.to_thread(get_pending_actions, pid)
+            # Slim down to the fields that matter for an LLM summary
+            slim_actions = [
+                {
+                    "action_id": a.get("action_id"),
+                    "type": a.get("type"),
+                    "domain": a.get("domain"),
+                    "description": a.get("description") or a.get("draft_content", "")[:200],
+                    "urgency_level": a.get("urgency_level"),
+                    "is_overdue": bool(a.get("is_overdue")),
+                    "review_by": a.get("review_by"),
+                    "manual_action_type": a.get("manual_action_type"),
+                }
+                for a in pending
+            ]
+            try:
+                life_graph = await asyncio.to_thread(serialize_complete_life_graph, pid) or {}
+            except Exception:
+                life_graph = {}
+            context["patients"].append({
+                "patient_id": pid,
+                "pending_actions": slim_actions,
+                "life_graph": life_graph,
+            })
+    else:
+        # No specific patient — return org-wide ranked actions
+        rankings = await asyncio.to_thread(get_action_rankings)
+        # Include top 20 to keep prompt size reasonable
+        context["all_pending_actions_ranked"] = [
+            {
+                "action_id": a.get("action_id"),
+                "patient_id": a.get("patient_id"),
+                "type": a.get("type"),
+                "domain": a.get("domain"),
+                "description": (a.get("description") or a.get("draft_content", ""))[:200],
+                "urgency_level": a.get("urgency_level"),
+                "is_overdue": bool(a.get("is_overdue")),
+                "score": a.get("score"),
+                "review_by": a.get("review_by"),
+            }
+            for a in rankings[:20]
+        ]
+
+    return context
+
+
+async def _handle_general_chat(
+    ctx: Context,
+    session_id: str,
+    messages: list[dict],
+) -> GeneralChatResponse:
+    last_msg = _last_user_message(messages)
+
+    # --- Clarification continuation ---
+    if _is_in_clarification(messages):
+        intent_class, domain, prior_patients = _get_clarification_context(messages)
+        confirm = await _check_caregiver_confirmed(last_msg)
+        if confirm.get("confirmed"):
+            # Proceed to action generation / question answering
+            patient_ids = [p["id"] for p in prior_patients]
+            pid = patient_ids[0] if patient_ids else None
+            if intent_class == "create-action":
+                if not pid:
+                    reply = "To create an action, I need to know which patient this is for. Could you provide their name?"
+                    return GeneralChatResponse(reply=reply, stage="clarifying", intent_class=intent_class, domain=domain, patient_ids=patient_ids)
+                patient_record = await asyncio.to_thread(get_patient, pid)
+                pname = patient_record.get("name", pid) if patient_record else pid
+                # Find the original request (first user message in this flow)
+                original_request = messages[0]["content"] if messages else last_msg
+                draft = await _generate_draft_action(domain, pid, pname, original_request)
+                missing = _validate_draft(draft)
+                if missing:
+                    reply = f"I wasn't able to generate a complete action draft (missing: {', '.join(missing)}). Could you provide more details?"
+                    return GeneralChatResponse(reply=reply, stage="error", intent_class=intent_class, domain=domain, patient_ids=patient_ids)
+                draft_id = await asyncio.to_thread(write_staged_action, session_id, draft)
+                reply = (
+                    f"Here's a draft action for {pname}: **{draft.get('type', 'care task')}** — "
+                    f"{draft.get('description', '')}. "
+                    f"Would you like to approve it, modify it, or discard it?"
+                )
+                return GeneralChatResponse(reply=reply, stage="draft_ready", draft_action_id=draft_id, intent_class=intent_class, domain=domain, patient_ids=patient_ids)
+            else:
+                # Question path — answer directly
+                life_graph: dict = {}
+                if pid:
+                    try:
+                        life_graph = await asyncio.to_thread(serialize_complete_life_graph, pid) or {}
+                    except Exception:
+                        pass
+                system_prompt = "You are a care operations assistant. Answer the caregiver's question using the provided patient context. Be concise and clinically accurate."
+                user_prompt = f"Question: {last_msg}\n\nPatient context:\n{json.dumps(life_graph, indent=2)}"
+                try:
+                    answer = await asyncio.to_thread(call_claude, system_prompt, user_prompt, 800)
+                except Exception as exc:
+                    answer = f"Unable to answer: {exc}"
+                return GeneralChatResponse(reply=answer, stage="answered", intent_class=intent_class, domain=domain, patient_ids=patient_ids)
+        else:
+            # Caregiver corrected — re-classify with full context
+            correction = confirm.get("correction") or last_msg
+            new_messages = list(messages)
+            classification = await _classify_general_chat_intent(new_messages)
+            intent_class = classification.get("intent", intent_class)
+            domain = classification.get("domain", domain)
+            names = await _extract_patient_names(new_messages)
+            if not names:
+                names = [p.get("name", p["id"]) for p in prior_patients]
+            patients = await _resolve_patients_from_names(names)
+            if not patients:
+                patients = prior_patients
+            patient_ids = [p["id"] for p in patients]
+            pnames = ", ".join(p["name"] for p in patients) if patients else "the patient"
+            verb = "create an action" if intent_class == "create-action" else "answer a question"
+            reply = f"Got it. So you'd like to {verb} in the {domain} domain for {pnames} — is that correct?"
+            return GeneralChatResponse(reply=reply, stage="clarifying", intent_class=intent_class, domain=domain, patient_ids=patient_ids)
+
+    # --- Fresh classification ---
+    classification = await _classify_general_chat_intent(messages)
+    intent_class = classification.get("intent", "question")
+    domain = classification.get("domain", "health")
+    needs_db_query = classification.get("needs_db_query", True)
+
+    if intent_class == "question":
+        names = await _extract_patient_names(messages)
+        patients = await _resolve_patients_from_names(names)
+        patient_ids = [p["id"] for p in patients]
+
+        if needs_db_query:
+            # Answer directly from structured DB data — no domain expertise needed
+            db_context = await _fetch_question_context(patient_ids, domain)
+            system_prompt = (
+                "You are a care operations assistant for MACOS. "
+                "Answer the caregiver's question using ONLY the structured data provided. "
+                "Be specific: cite action descriptions, urgency levels, and overdue status. "
+                "If the data shows no relevant records, say so clearly."
+            )
+            user_prompt = f"Question: {last_msg}\n\nData:\n{json.dumps(db_context, indent=2)}"
+        else:
+            # Domain expertise needed — use life graph
+            life_graph: dict = {}
+            if patient_ids:
+                try:
+                    life_graph = await asyncio.to_thread(serialize_complete_life_graph, patient_ids[0]) or {}
+                except Exception:
+                    pass
+            system_prompt = "You are a care operations assistant. Answer the caregiver's question using the provided patient context. Be concise and clinically accurate."
+            user_prompt = f"Question: {last_msg}\n\nPatient context:\n{json.dumps(life_graph, indent=2)}"
+
+        try:
+            answer = await asyncio.to_thread(call_claude, system_prompt, user_prompt, 800)
+        except Exception as exc:
+            answer = f"Unable to answer: {exc}"
+        return GeneralChatResponse(reply=answer, stage="answered", intent_class="question", domain=domain, patient_ids=patient_ids)
+
+    # create-action — resolve patients and clarify
+    names = await _extract_patient_names(messages)
+    patients = await _resolve_patients_from_names(names)
+    patient_ids = [p["id"] for p in patients]
+    pnames = ", ".join(p["name"] for p in patients) if patients else "the patient"
+    domain_label = domain.capitalize()
+    reply = f"I'd like to create a {domain_label} action for {pnames}. Is that right? Let me know if you'd like to adjust the domain or patient."
+    return GeneralChatResponse(reply=reply, stage="clarifying", intent_class="create-action", domain=domain, patient_ids=patient_ids)
+
+
+@executor.on_rest_post("/general-chat", GeneralChatRequest, GeneralChatResponse)
+async def general_chat(ctx: Context, req: GeneralChatRequest) -> GeneralChatResponse:
+    ctx.logger.info("POST /general-chat session_id=%s msgs=%d", req.session_id, len(req.messages))
+    return await _handle_general_chat(ctx, req.session_id, [m.dict() for m in req.messages])
+
+
+@executor.on_rest_post("/general-chat/revise", ReviseRequest, ReviseResponse)
+async def general_chat_revise(ctx: Context, req: ReviseRequest) -> ReviseResponse:
+    ctx.logger.info("POST /general-chat/revise session_id=%s", req.session_id)
+    prompt = _REVISE_ACTION_PROMPT.format(
+        original_draft=json.dumps(req.original_draft, indent=2),
+        feedback=req.feedback,
+    )
+    try:
+        revised = await asyncio.to_thread(call_claude_json, "", prompt, 512)
+    except Exception as exc:
+        ctx.logger.error("Revise LLM call failed: %s", exc)
+        return ReviseResponse(revised_draft=None, reply=f"Unable to revise: {exc}")
+
+    if not isinstance(revised, dict):
+        return ReviseResponse(revised_draft=None, reply="Revision produced an unexpected response. Please try again.")
+
+    reply_parts = []
+    if "description" in revised:
+        reply_parts.append(f"Updated description: {revised['description']}")
+    if "type" in revised:
+        reply_parts.append(f"Type: {revised['type']}")
+    reply = ". ".join(reply_parts) if reply_parts else "Draft revised based on your feedback."
+    return ReviseResponse(revised_draft=revised, reply=reply)
+
+
 @executor.on_rest_get("/health", HealthResponse)
 async def health(_: Context) -> HealthResponse:
     return HealthResponse(status="ok healthy")
@@ -981,6 +1471,70 @@ async def internal_detect(ctx: Context, req: InternalDetectRequest) -> InternalD
         patient_id=req.patient_id,
     )
     return InternalDetectResponse(status="triggered", patient_id=req.patient_id, trigger=req.trigger)
+
+
+@executor.on_rest_post(
+    "/internal/expiration-check",
+    InternalExpirationCheckRequest,
+    InternalExpirationCheckResponse,
+)
+async def internal_expiration_check(
+    ctx: Context, req: InternalExpirationCheckRequest
+) -> InternalExpirationCheckResponse:
+    """Internal trigger: optionally force one action overdue and run expiration pass immediately."""
+    if not _executor_ready:
+        ctx.logger.error(
+            "POST /internal/expiration-check received but executor event loop is not ready"
+        )
+        from fastapi import HTTPException
+        raise HTTPException(
+            status_code=503,
+            detail="Executor event loop not ready; retry after agent startup completes",
+        )
+
+    forced_action_id: str | None = None
+    if req.force_overdue:
+        target_action_id = req.action_id
+        if not target_action_id:
+            for candidate in get_action_rankings():
+                if not candidate.get("completed") and not candidate.get("is_overdue"):
+                    target_action_id = candidate.get("action_id")
+                    break
+
+        if target_action_id:
+            action = get_action(target_action_id)
+            if action:
+                now_minus_one = (
+                    datetime.now(tz=timezone.utc) - timedelta(minutes=1)
+                ).strftime("%Y-%m-%dT%H:%M:%SZ")
+                update_action(
+                    target_action_id,
+                    {
+                        "review_by": now_minus_one,
+                        "completed": 0,
+                        "is_overdue": 0,
+                    },
+                )
+                forced_action_id = target_action_id
+                ctx.logger.info(
+                    "Forced action to overdue-ready state action_id=%s review_by=%s",
+                    target_action_id,
+                    now_minus_one,
+                )
+            else:
+                ctx.logger.warning(
+                    "Requested force_overdue action_id=%s not found",
+                    target_action_id,
+                )
+
+    stats = await _run_expiration_pass(ctx)
+    return InternalExpirationCheckResponse(
+        status="triggered",
+        forced_action_id=forced_action_id,
+        overdue_found=stats["overdue_found"],
+        alerts_sent_dashboard=stats["alerts_sent_dashboard"],
+        alerts_sent_asi_one=stats["alerts_sent_asi_one"],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1300,12 +1854,18 @@ async def heartbeat_and_timeout_sweep(ctx: Context) -> None:
 # Expiration loop
 # ---------------------------------------------------------------------------
 
-@executor.on_interval(period=900.0)
-async def expiration_check(ctx: Context) -> None:
-    """Mark overdue actions and emit deduped notifications for dashboard + asi_one channels."""
+async def _run_expiration_pass(ctx: Context) -> dict[str, int]:
+    """Single pass: mark overdue actions and emit deduped notifications."""
     overdue = get_overdue_actions()
     if not overdue:
-        return
+        return {
+            "overdue_found": 0,
+            "alerts_sent_dashboard": 0,
+            "alerts_sent_asi_one": 0,
+        }
+
+    alerts_sent_dashboard = 0
+    alerts_sent_asi_one = 0
     ctx.logger.info("Expiration check: %d overdue action(s) found", len(overdue))
     for action in overdue:
         action_id = action["action_id"]
@@ -1322,10 +1882,58 @@ async def expiration_check(ctx: Context) -> None:
                     title=f"Overdue: {action.get('type', 'task')} for patient {patient_id}",
                     body=action.get("description", "Action review deadline has passed"),
                 )
+                alerts_sent_dashboard += 1
+            elif channel == "asi_one":
+                if ASI_ONE_AGENT_ADDRESS:
+                    try:
+                        await ctx.send(
+                            ASI_ONE_AGENT_ADDRESS,
+                            ChatMessage(
+                                timestamp=datetime.now(tz=timezone.utc),
+                                msg_id=uuid4(),
+                                content=[
+                                    TextContent(
+                                        type="text",
+                                        text=(
+                                            f"⚠️ Overdue action alert\n"
+                                            f"Patient: {patient_id}\n"
+                                            f"Type: {action.get('type', 'task')}\n"
+                                            f"Details: {action.get('description', 'Action review deadline has passed')}\n"
+                                            f"Action ID: {action_id}"
+                                        ),
+                                    ),
+                                ],
+                            ),
+                        )
+                        ctx.logger.info(
+                            "Sent ASI:One overdue alert action_id=%s target=%s",
+                            action_id, ASI_ONE_AGENT_ADDRESS,
+                        )
+                        alerts_sent_asi_one += 1
+                    except Exception as send_err:
+                        ctx.logger.error(
+                            "Failed to send ASI:One alert action_id=%s: %s", action_id, send_err
+                        )
+                else:
+                    ctx.logger.debug(
+                        "ASI_ONE_AGENT_ADDRESS not set, skipping asi_one alert action_id=%s", action_id
+                    )
             log_expiration_notification(action_id, channel)
             ctx.logger.info(
                 "Expiration notification logged action_id=%s channel=%s", action_id, channel
             )
+
+    return {
+        "overdue_found": len(overdue),
+        "alerts_sent_dashboard": alerts_sent_dashboard,
+        "alerts_sent_asi_one": alerts_sent_asi_one,
+    }
+
+
+@executor.on_interval(period=900.0)
+async def expiration_check(ctx: Context) -> None:
+    """Mark overdue actions and emit deduped notifications for dashboard + asi_one channels."""
+    await _run_expiration_pass(ctx)
 
 
 # ---------------------------------------------------------------------------

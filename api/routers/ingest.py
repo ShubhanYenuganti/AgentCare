@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import logging
 import os
 from typing import Annotated
 
@@ -11,10 +12,11 @@ from fastapi import APIRouter, Form, UploadFile
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from agents.shared.db import write_patient
+from agents.shared.db import append_ingest_audit_row, write_patient
 from agents.shared.llm import call_claude_json, call_claude_vision
 
 router = APIRouter(prefix="/ingest", tags=["ingest"])
+logger = logging.getLogger(__name__)
 
 EXECUTOR_INTERNAL_URL = os.getenv("EXECUTOR_INTERNAL_URL", "")
 
@@ -85,6 +87,12 @@ async def ingest_text(body: IngestTextBody):
     try:
         patient_id = write_patient(extracted)
         detect_status = await _trigger_detect(patient_id, "patient_create")
+        try:
+            append_ingest_audit_row(
+                patient_id, source="text", detect_status=detect_status
+            )
+        except Exception as audit_err:
+            logger.warning("ingest text audit log failed: %s", audit_err)
         return ok({"patient_id": patient_id, "extracted": extracted, "detect_status": detect_status})
     except Exception as exc:
         return JSONResponse(status_code=500, content=err(str(exc)))
@@ -166,6 +174,15 @@ async def ingest_file(
     try:
         pid = write_patient(extracted)
         detect_status = await _trigger_detect(pid, "patient_create")
+        try:
+            append_ingest_audit_row(
+                pid,
+                source="file",
+                detect_status=detect_status,
+                filename=file.filename,
+            )
+        except Exception as audit_err:
+            logger.warning("ingest file audit log failed: %s", audit_err)
         return ok({"patient_id": pid, "extracted": extracted, "detect_status": detect_status})
     except Exception as exc:
         return JSONResponse(status_code=500, content=err(str(exc)))

@@ -3,26 +3,7 @@
   "care_philosophy": "We provide holistic, person-centered care that respects each client's dignity, autonomy, and individual needs. Our team coordinates proactively across health, appointments, finances, and daily living to keep clients safe and thriving at home.",
   "escalation_lead": "Dr. Patricia Nguyen",
   "escalation_chain": "1. Primary caregiver → 2. Care coordinator → 3. Dr. Nguyen (escalation lead) → 4. Emergency services (911)",
-  "protocols": [
-    {
-      "name": "Missed Medication Protocol",
-      "description": "If a client misses more than 2 consecutive doses of a critical medication, escalate immediately to the care coordinator and notify the prescribing physician within 4 hours.",
-      "domain": "health"
-    },
-    {
-      "name": "Appointment Scheduling Protocol",
-      "description": "All specialist appointments must be confirmed at least 48 hours in advance. If transport is required, coordinate with the scheduling team 72 hours prior.",
-      "domain": "appointment"
-    },
-    {
-      "name": "Financial Anomaly Protocol",
-      "description": "Any bill exceeding 150% of the prior month's amount must be flagged for caregiver review before payment. Autopay accounts are audited monthly.",
-      "domain": "financial"
-    },
-    {
-      "name": "Grocery Continuity Protocol",
-      "description": "Grocery deliveries should occur at least every 10 days. If a delivery lapses beyond 10 days, a reorder must be initiated and documented.",
-      "domain": "grocery"
-    }
-  ]
+  "health_protocol": "Missed Medication Protocol: If a client misses more than 2 consecutive doses of a critical medication, escalate immediately to the care coordinator and notify the prescribing physician within 4 hours.",
+  "transport_protocol": "Appointment Scheduling Protocol: All specialist appointments must be confirmed at least 48 hours in advance. If transport is required, coordinate with the scheduling team 72 hours prior. Grocery Continuity Protocol: Grocery deliveries should occur at least every 10 days. If a delivery lapses beyond 10 days, a reorder must be initiated and documented.",
+  "financial_protocol": "Financial Anomaly Protocol: Any bill exceeding 150% of the prior month's amount must be flagged for caregiver review before payment. Autopay accounts are audited monthly."
 }

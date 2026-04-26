@@ -115,13 +115,24 @@ export default function ActionFeed() {
     );
   }
 
+  const pendingCount = actions.filter((a) => a.completed === 0).length;
+  const completedAutonomousCount = actions.filter(
+    (a) =>
+      a.completed === 1 &&
+      !String(a.manual_action_type ?? "").trim() &&
+      a.outcome === "approved"
+  ).length;
+
   return (
     <div style={PAGE_SHEET}>
       <div style={PAGE_INNER}>
         <div style={TITLE_BLOCK}>
           <h1 style={H1}>Action Feed</h1>
           <span style={SUB}>
-            {actions.length} pending
+            {pendingCount} pending
+            {completedAutonomousCount > 0
+              ? ` · ${completedAutonomousCount} completed (automation)`
+              : ""}
             {actions.length === 0 ? " — you’re all caught up" : ""}
           </span>
         </div>

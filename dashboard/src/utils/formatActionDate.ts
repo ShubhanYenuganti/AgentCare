@@ -39,6 +39,32 @@ export function formatTimeRangeLocal(start: string | null | undefined, end: stri
   return `${left} – ${e.toLocaleTimeString(undefined, timeOpts)}`;
 }
 
+/** `HH:MM` / `H:MM:SS` wall time, or full ISO, → locale 12h (e.g. 9:00 AM). Used for schedule grid cells. */
+const WALL_HM = /^(\d{1,2}):(\d{2})(?::\d{2})?$/;
+
+export function formatWallTimeToAmPm(t: string | null | undefined): string {
+  if (t == null || t === "") return "—";
+  const x = t.trim();
+  if (WALL_HM.test(x)) {
+    const m = x.match(WALL_HM)!;
+    const h = parseInt(m[1]!, 10);
+    const min = parseInt(m[2]!, 10);
+    if (h >= 0 && h <= 23 && min >= 0 && min <= 59) {
+      const d = new Date(2000, 0, 1, h, min, 0, 0);
+      return d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit", hour12: true });
+    }
+  }
+  const d = parseBackendDate(x);
+  if (!Number.isNaN(d.getTime())) {
+    return d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit", hour12: true });
+  }
+  return x;
+}
+
+export function formatWallTimeRangeToAmPm(start: string, end: string): string {
+  return `${formatWallTimeToAmPm(start)} – ${formatWallTimeToAmPm(end)}`;
+}
+
 /** Format ISO review_by for display in the user's local timezone. */
 export function formatReviewByLocal(iso: string | null | undefined): string | null {
   if (iso == null || iso === "") return null;

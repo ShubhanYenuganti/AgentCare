@@ -11,6 +11,7 @@ const PatientRoster = lazy(() => import("./views/PatientRoster"));
 const CaregiverManagement = lazy(() => import("./views/CaregiverManagement"));
 const OrgDashboard = lazy(() => import("./views/OrgDashboard"));
 const Onboarding = lazy(() => import("./views/Onboarding"));
+const ChatPanel = lazy(() => import("./components/ChatPanel"));
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
@@ -56,6 +57,14 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
               element={
                 <Suspense fallback={<p style={{ padding: "1.5rem" }}>Loading…</p>}>
                   <OrgDashboard />
+                </Suspense>
+              }
+            />
+            <Route
+              path="/chat"
+              element={
+                <Suspense fallback={<p style={{ padding: "1.5rem" }}>Loading…</p>}>
+                  <ChatPanel />
                 </Suspense>
               }
             />

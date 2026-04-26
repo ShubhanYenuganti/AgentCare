@@ -602,6 +602,43 @@ def write_patient_update(update: dict[str, Any]) -> int:
         return int(cursor.lastrowid)
 
 
+def append_ingest_audit_row(
+    patient_id: str,
+    *,
+    source: str,
+    detect_status: str,
+    filename: str | None = None,
+) -> int:
+    """
+    Log a completed ingest/merge in patient_updates (confirmed+applied) so
+    /patients/{id}/update-history can show intake alongside staged LLM updates.
+    """
+    if source == "file":
+        label = f"File intake ({filename or 'upload'})"
+    else:
+        label = "Text intake"
+    summary = f"{label} — record merged. Detection: {detect_status}."
+    meta: dict[str, Any] = {
+        "ingest": True,
+        "source": source,
+        "detect_status": detect_status,
+    }
+    if filename:
+        meta["filename"] = filename
+    with get_connection() as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO patient_updates (
+                patient_id, caregiver_id, domain, operation, fields_changed,
+                summary, proposed_changes, confirmed, applied
+            ) VALUES (?, NULL, 'general', ?, '[]', ?, ?, 1, 1)
+            """,
+            (patient_id, f"ingest_{source}", summary, json.dumps(meta)),
+        )
+        conn.commit()
+        return int(cursor.lastrowid)
+
+
 def get_patient_update(update_id: int) -> dict[str, Any]:
     with get_connection() as conn:
         row = conn.execute(
@@ -667,6 +704,8 @@ def apply_patient_update(update_id: int, changes: dict[str, Any]) -> None:
         return
     patient_id = update["patient_id"]
     operation = update.get("operation")
+    if operation and str(operation).startswith("ingest_"):
+        return
     if operation == "remove":
         for table, (pk_field, deactivate_fn) in _SUBTABLE_DEACTIVATORS.items():
             for item in changes.get(table, []):
@@ -913,6 +952,29 @@ def get_action_rankings() -> list[dict[str, Any]]:
         ),
         reverse=True,
     )
+
+
+def get_completed_autonomous_approved_actions(limit: int = 30) -> list[dict[str, Any]]:
+    """
+    Autonomous = no manual_action_type. Shown in the action feed after approval so
+    the dashboard can display stored approval_execution (mock API / email / gmaps) results.
+    """
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM action_history
+            WHERE completed = 1
+              AND (manual_action_type IS NULL OR TRIM(manual_action_type) = '')
+              AND IFNULL(outcome, '') = 'approved'
+            ORDER BY COALESCE(completion_date, last_modified_at, created_at) DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    results = _rows_to_dicts(rows)
+    for row in results:
+        row["api_payload"] = _json_load(row.get("api_payload"), None)
+    return results
 
 
 # Chat helpers
@@ -1286,3 +1348,137 @@ def get_latest_pending_scheduling_action(requester_address: str) -> dict[str, An
             row["api_payload"] = payload
             return row
     return None
+
+
+# ---------------------------------------------------------------------------
+# General chat session helpers
+# ---------------------------------------------------------------------------
+
+def create_session(session_id: str) -> str:
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO chat_sessions (id) VALUES (?)",
+            (session_id,),
+        )
+        conn.commit()
+    return session_id
+
+
+def write_chat_session_message(
+    session_id: str,
+    role: str,
+    content: str,
+    stage: str = "",
+    intent_class: str | None = None,
+    domain: str | None = None,
+    patient_ids: list[str] | None = None,
+    draft_action_id: str | None = None,
+) -> int:
+    with get_connection() as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO chat_messages
+              (session_id, role, content, stage, intent_class, domain, patient_ids, draft_action_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                session_id,
+                role,
+                content,
+                stage,
+                intent_class,
+                domain,
+                json.dumps(patient_ids) if patient_ids is not None else None,
+                draft_action_id,
+            ),
+        )
+        conn.commit()
+        return cursor.lastrowid  # type: ignore[return-value]
+
+
+def get_session_messages(session_id: str) -> list[dict[str, Any]]:
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT * FROM chat_messages WHERE session_id=? ORDER BY id ASC",
+            (session_id,),
+        ).fetchall()
+    msgs = _rows_to_dicts(rows)
+    for m in msgs:
+        m["patient_ids"] = _json_load(m.get("patient_ids"), [])
+    return msgs
+
+
+def session_exists(session_id: str) -> bool:
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT id FROM chat_sessions WHERE id=? LIMIT 1", (session_id,)
+        ).fetchone()
+    return row is not None
+
+
+def write_staged_action(session_id: str, draft_payload: dict[str, Any]) -> str:
+    draft_id = f"draft_{uuid4().hex[:12]}"
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO staged_actions (id, session_id, draft_payload, status)
+            VALUES (?, ?, ?, 'pending_approval')
+            """,
+            (draft_id, session_id, json.dumps(draft_payload)),
+        )
+        conn.commit()
+    return draft_id
+
+
+def get_staged_action(draft_id: str) -> dict[str, Any] | None:
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM staged_actions WHERE id=? LIMIT 1", (draft_id,)
+        ).fetchone()
+    if not row:
+        return None
+    result = _row_to_dict(row)
+    result["draft_payload"] = _json_load(result.get("draft_payload"), {})
+    return result
+
+
+def update_staged_action_payload(draft_id: str, draft_payload: dict[str, Any]) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE staged_actions SET draft_payload=? WHERE id=?",
+            (json.dumps(draft_payload), draft_id),
+        )
+        conn.commit()
+
+
+def update_staged_action_status(draft_id: str, status: str) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE staged_actions SET status=? WHERE id=?",
+            (status, draft_id),
+        )
+        conn.commit()
+
+
+def commit_staged_to_action_history(draft_id: str) -> str:
+    staged = get_staged_action(draft_id)
+    if not staged or staged.get("status") != "pending_approval":
+        raise ValueError(f"Staged action {draft_id!r} not found or not pending_approval")
+    payload = staged["draft_payload"]
+    action_id = write_action(payload)
+    update_staged_action_status(draft_id, "committed")
+    return action_id
+
+
+def expire_old_staged_actions(max_age_hours: int = 24) -> int:
+    with get_connection() as conn:
+        cursor = conn.execute(
+            """
+            UPDATE staged_actions SET status='discarded'
+            WHERE status='pending_approval'
+              AND created_at < datetime('now', ?)
+            """,
+            (f"-{max_age_hours} hours",),
+        )
+        conn.commit()
+        return cursor.rowcount

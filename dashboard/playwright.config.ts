@@ -1,7 +1,7 @@
 import { defineConfig, devices } from "@playwright/test";
 
 /**
- * Playwright config for MACOS dashboard E2E tests.
+ * Playwright config for AgentCare dashboard E2E tests.
  * Tests run against the real FastAPI backend (started via globalSetup).
  */
 export default defineConfig({

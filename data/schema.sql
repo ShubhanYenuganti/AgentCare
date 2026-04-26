@@ -221,3 +221,32 @@ CREATE TABLE IF NOT EXISTS expiration_notifications (
   notified_at TEXT,
   channel     TEXT
 );
+
+-- General chat sessions (freeform, not action-bound)
+CREATE TABLE IF NOT EXISTS chat_sessions (
+  id         TEXT PRIMARY KEY,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+-- General chat messages per session
+CREATE TABLE IF NOT EXISTS chat_messages (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id      TEXT REFERENCES chat_sessions(id),
+  role            TEXT,
+  content         TEXT,
+  stage           TEXT,
+  intent_class    TEXT,
+  domain          TEXT,
+  patient_ids     TEXT,
+  draft_action_id TEXT,
+  created_at      TEXT DEFAULT (datetime('now'))
+);
+
+-- Staged (draft) actions awaiting caregiver approval
+CREATE TABLE IF NOT EXISTS staged_actions (
+  id            TEXT PRIMARY KEY,
+  session_id    TEXT REFERENCES chat_sessions(id),
+  draft_payload TEXT,
+  status        TEXT DEFAULT 'pending_approval',
+  created_at    TEXT DEFAULT (datetime('now'))
+);

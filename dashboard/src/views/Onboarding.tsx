@@ -221,9 +221,7 @@ function StepPatients({ onNext }: { onNext: () => void }) {
 
   const handleUpload = async () => {
     if (!file) return;
-    const fd = new FormData();
-    fd.append("file", file);
-    await ingestFile(fd);
+    await ingestFile({ file });
     setFile(null);
     setDone(true);
   };
@@ -330,7 +328,7 @@ export default function Onboarding() {
     <div style={{ minHeight: "100vh", background: BG, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "flex-start", padding: "3rem 1rem 4rem" }}>
       {/* Brand */}
       <div style={{ marginBottom: "2.5rem", textAlign: "center" }}>
-        <div style={{ fontWeight: 600, fontSize: "1.4rem", letterSpacing: "0.06em", color: "#0a0a0a" }}>MACOS</div>
+        <div style={{ fontWeight: 600, fontSize: "1.4rem", letterSpacing: "0.06em", color: "#0a0a0a" }}>AgentCare</div>
         <div style={{ fontSize: "0.85rem", color: "#6b7280", marginTop: "0.2rem" }}>Multi-Agent Care Operations System</div>
       </div>
 
