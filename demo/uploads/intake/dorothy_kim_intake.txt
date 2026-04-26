@@ -1,6 +1,3 @@
-# TARGET: patient_id=pt_003 | POST /ingest/file
-# EXPECTED: Creates or updates patient Dorothy Kim with full life graph data
-
 ===================================
 SUNRISE CARE PARTNERS
 CLIENT INTAKE FORM

@@ -112,9 +112,12 @@ def test_patch_action_idempotency_key_deduplication():
     data2 = assert_success(resp2)
 
     # Both responses reference the same action; the idempotency_key is stored
+    # in its dedicated column rather than overloading api_payload.
     assert data1["action_id"] == data2["action_id"]
-    stored_payload = data1.get("api_payload") or {}
-    assert stored_payload.get("idempotency_key") == "idem-abc-123"
+    assert data1.get("modification_idempotency_key") == "idem-abc-123"
+    assert data1.get("api_payload") in (None, {}), (
+        "api_payload must remain untouched by modification idempotency tracking"
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -125,10 +125,15 @@ def infer_primary_route_for_action(action: dict[str, Any]) -> str | None:
     if route:
         return route
 
-    # Legacy fallback for historical actions: infer by domain if payload exists.
+    # Legacy fallback for historical flat payloads: infer by domain only when
+    # the payload actually contains at least one of the route's required keys.
+    # This prevents unrelated bookkeeping dicts from being mistaken for a call.
     domain = str(action.get("domain") or "").strip().lower()
     if isinstance(payload, dict) and payload and domain in _DOMAIN_DEFAULT_ROUTE_MAP:
-        return _DOMAIN_DEFAULT_ROUTE_MAP[domain]
+        candidate = _DOMAIN_DEFAULT_ROUTE_MAP[domain]
+        required = _required_payload_keys(candidate)
+        if required and any(key in payload for key in required):
+            return candidate
     return None
 
 

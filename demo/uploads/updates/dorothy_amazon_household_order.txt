@@ -1,7 +1,3 @@
-# TARGET: patient_id=pt_003 | POST /patients/pt_003/update/file
-# EXPECTED DOMAIN: grocery
-# EXPECTED ACTION: Household supply reorder via Amazon path, non-overdue, automation-ready
-
 ===================================
 HOUSEHOLD SUPPLY REORDER (AMAZON)
 ===================================
@@ -26,17 +22,3 @@ Items requested:
 
 ACTION REQUESTED:
 Submit Amazon order and provide estimated delivery date in the action execution output.
-
----
-AUTOMATION_HINT
----
-TARGET_ROUTE: POST /mock/amazon/order
-REQUIRED_PARAMS:
-  patient_id: pt_003
-  items:
-    - diabetic test strips (30ct)
-    - alcohol prep pads
-    - pill organizer (weekly)
-    - paper towels
-    - gentle hand soap
-

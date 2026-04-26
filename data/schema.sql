@@ -189,6 +189,7 @@ CREATE TABLE IF NOT EXISTS action_history (
   email_subject            TEXT,
   schedule                 TEXT,
   last_modified_at         TEXT,
+  modification_idempotency_key TEXT,
   created_at               TEXT DEFAULT (datetime('now'))
 );
 
