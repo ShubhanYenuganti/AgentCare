@@ -76,6 +76,10 @@ SCHEDULING_AGENT_ADDRESS = os.getenv("SCHEDULING_AGENT_ADDRESS") or _address_fro
     SCHEDULING_AGENT_SEED
 )
 
+# Optional: if set, the executor sends overdue-action alerts to this Agentverse address.
+# Typically the address of the care coordinator's agent on app.agentverse.ai.
+ASI_ONE_AGENT_ADDRESS: str | None = os.getenv("ASI_ONE_AGENT_ADDRESS") or None
+
 SUPERVISOR_ADDRESS_BY_DOMAIN = {
     "health": HEALTH_SUPERVISOR_ADDRESS,
     "appointment": APPOINTMENT_SUPERVISOR_ADDRESS,

@@ -1,0 +1,13 @@
+{
+  "name": "Sarah Okafor",
+  "email": "sarah.okafor@sunrisecare.org",
+  "phone": "+1-555-1001",
+  "role": "caregiver",
+  "schedule": {
+    "Mon": { "start": "08:00", "end": "16:00" },
+    "Tue": { "start": "08:00", "end": "16:00" },
+    "Wed": { "start": "10:00", "end": "18:00" },
+    "Thu": { "start": "08:00", "end": "16:00" },
+    "Fri": { "start": "08:00", "end": "14:00" }
+  }
+}

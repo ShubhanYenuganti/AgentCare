@@ -1,0 +1,48 @@
+# TARGET: patient_id=pt_003 | POST /patients/pt_003/update/file
+# EXPECTED DOMAIN: grocery
+# EXPECTED ACTION: Grocery cart creation via Instacart path, non-overdue, automation-ready
+
+===================================
+GROCERY RESTOCK REQUEST (INSTACART)
+===================================
+
+Date: April 26, 2026
+Caregiver: James Reyes
+Patient: Dorothy Kim (pt_003)
+
+---
+RESTOCK REQUEST
+---
+
+Dorothy's diabetic-friendly groceries should be restocked this week.
+Please build and submit an Instacart-style cart for next-business-day delivery.
+
+Items requested:
+  - low-glycemic bread
+  - steel-cut oatmeal
+  - spinach
+  - arugula
+  - almond milk (unsweetened)
+  - eggs
+
+Dietary flags:
+  - diabetic-friendly
+  - no_shellfish
+
+ACTION REQUESTED:
+Create grocery cart and return cart ID plus estimated delivery window.
+
+---
+AUTOMATION_HINT
+---
+TARGET_ROUTE: POST /mock/instacart/cart
+REQUIRED_PARAMS:
+  patient_id: pt_003
+  items:
+    - low-glycemic bread
+    - steel-cut oatmeal
+    - spinach
+    - arugula
+    - almond milk (unsweetened)
+    - eggs
+

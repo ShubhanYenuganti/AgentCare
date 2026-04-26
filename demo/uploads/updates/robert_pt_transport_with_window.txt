@@ -1,0 +1,43 @@
+# TARGET: patient_id=pt_002 | POST /patients/pt_002/update/file
+# EXPECTED DOMAIN: appointment (scheduling)
+# EXPECTED ACTION: Transport/scheduling action with schedule payload, non-overdue
+
+===================================
+OAKLAND REHAB TRANSPORT COORDINATION NOTE
+===================================
+
+Date: April 26, 2026
+Patient: Robert Harris (pt_002)
+Caregiver author: Linda Park
+
+---
+APPOINTMENT + TRANSPORT
+---
+
+Robert has a physical therapy visit that needs coordinated caregiver transport.
+Please assign transport coverage and confirm caregiver availability for the planned visit window.
+
+Visit details:
+  - Appointment date: 2026-04-30
+  - Appointment start: 10:00
+  - Appointment end: 12:00
+  - Destination: Oakland Rehab Center, 1200 Broadway, Oakland, CA
+
+ACTION REQUESTED:
+Create a scheduling/transport action and include a schedule window so assignment can be made
+from caregiver availability.
+
+---
+AUTOMATION_HINT
+---
+TARGET_ROUTE: POST /mock/cal/book
+SCHEDULE_WINDOW:
+  date: 2026-04-30
+  start_time: "10:00"
+  end_time: "12:00"
+REQUIRED_PARAMS:
+  provider: Dr. Yolanda Moreno
+  patient_id: pt_002
+  preferred_times:
+    - morning
+

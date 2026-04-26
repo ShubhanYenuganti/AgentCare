@@ -1,0 +1,40 @@
+# TARGET: patient_id=pt_001 | POST /patients/pt_001/update/file
+# EXPECTED DOMAIN: appointment
+# EXPECTED ACTION: Appointment booking coordination (upcoming window), non-overdue, automation-ready
+
+===================================
+UCSF CARDIOLOGY SCHEDULING MESSAGE
+===================================
+
+Date: April 26, 2026
+To: Sunrise Care Coordination Team
+Patient: Margaret Chen (pt_001)
+Provider: Dr. Rafael Torres
+
+---
+BOOKING REQUEST
+---
+
+Margaret Chen is due for a routine cardiology follow-up in the next scheduling window.
+Please book a visit in the upcoming 1-2 weeks.
+
+Preferred time windows:
+  - Morning preferred
+  - Afternoon acceptable if morning unavailable
+
+No missed appointment is being reported in this update. This is a forward scheduling request.
+
+ACTION REQUESTED:
+Book the next available cardiology slot with Dr. Rafael Torres and return confirmation details.
+
+---
+AUTOMATION_HINT
+---
+TARGET_ROUTE: POST /mock/cal/book
+REQUIRED_PARAMS:
+  provider: Dr. Rafael Torres
+  patient_id: pt_001
+  preferred_times:
+    - morning
+    - afternoon
+

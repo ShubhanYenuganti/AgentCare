@@ -1,0 +1,114 @@
+# TARGET: patient_id=pt_001 | POST /ingest/file
+# EXPECTED: Creates or updates patient Margaret Chen with full life graph data
+
+===================================
+SUNRISE CARE PARTNERS
+CLIENT INTAKE FORM
+===================================
+
+Date of Intake: February 3, 2026
+Intake Coordinator: Tom Callahan
+Form Version: 3.2
+
+---
+SECTION 1: PERSONAL INFORMATION
+---
+Full Name: Margaret Lily Chen
+Date of Birth: March 14, 1947  |  Age: 78
+Gender: Female
+Address: 412 Elm Street, San Francisco, CA 94117
+Phone: +1-415-555-0190
+Email: mchen1947@gmail.com
+Preferred Language: English
+
+---
+SECTION 2: EMERGENCY CONTACTS
+---
+Contact 1:
+  Name: Linda Chen (daughter)
+  Phone: +1-415-555-0192
+  Relationship: daughter
+
+Contact 2:
+  Name: David Chen (son)
+  Phone: +1-415-555-0317
+  Relationship: son
+
+---
+SECTION 3: MEDICAL CONDITIONS
+---
+Primary Diagnoses:
+  1. Congestive Heart Failure (CHF) — diagnosed 2019
+  2. Type 2 Diabetes Mellitus — diagnosed 2012
+  3. Hypertension — diagnosed 2010
+
+Allergies:
+  - Penicillin: reaction = rash
+  - Sulfa drugs: reaction = anaphylaxis risk, avoid
+
+Last Physical Exam: September 15, 2025 (Dr. Patel, UCSF Primary Care)
+
+---
+SECTION 4: CURRENT MEDICATIONS
+---
+1. Lisinopril 10mg — once daily (morning) — for hypertension/CHF
+   Last refill: 2026-01-20 | Next refill due: 2026-04-20
+
+2. Metoprolol Succinate 25mg — twice daily (morning, evening) — for CHF/heart rate
+   Last refill: 2026-02-01 | Next refill due: 2026-05-01
+
+3. Metformin 500mg — twice daily (with meals) — for diabetes
+   Last refill: 2026-01-15 | Next refill due: 2026-04-15
+
+4. Furosemide 20mg — once daily (morning) — diuretic for CHF
+   Last refill: 2026-01-10 | Next refill due: 2026-04-10
+
+---
+SECTION 5: UPCOMING APPOINTMENTS
+---
+1. Cardiology follow-up
+   Provider: Dr. Rafael Torres, UCSF Cardiology
+   Last completed: June 2, 2025
+   Recommended interval: every 6 months (overdue as of December 2025)
+   Transport needed: no (daughter Linda drives)
+
+2. Primary Care check-in
+   Provider: Dr. Anaya Patel, UCSF Primary Care
+   Next scheduled: April 30, 2026
+   Transport needed: no
+
+---
+SECTION 6: GROCERY & DIETARY PREFERENCES
+---
+Diet type: Low-sodium, diabetic-friendly
+Restrictions: No shellfish (preference), low processed sugar
+Preferred delivery service: Instacart (weekly)
+Last delivery: April 10, 2026
+
+Staples:
+  - Whole grain bread
+  - Oatmeal (steel cut)
+  - Bananas
+  - Greek yogurt (plain, low-fat)
+  - Salmon (fresh or frozen)
+  - Leafy greens (spinach, kale)
+  - Low-sodium canned tomatoes
+
+---
+SECTION 7: FINANCIAL INFORMATION
+---
+Insurance: Medicare Advantage (Blue Shield)
+Secondary: Medi-Cal
+
+Recurring bills on autopay:
+  - PG&E utility: ~$85/month, due 15th
+  - AT&T phone: ~$42/month, due 20th
+  - Medicare Advantage premium: $0 (covered)
+
+---
+SECTION 8: CARE PREFERENCES & NOTES
+---
+Prefers female caregivers when possible.
+Enjoys afternoon visits (2–5pm); morning visits acceptable for medication checks.
+Is a very private person — please knock and wait.
+Reads daily; enjoys tea. Do not rearrange her bookshelf.

@@ -1,0 +1,42 @@
+# TARGET: patient_id=pt_001 | POST /patients/pt_001/update/file
+# EXPECTED DOMAIN: appointment
+# EXPECTED ACTION: Cardiology follow-up scheduling — 8 months overdue, tier_1 urgency
+
+===================================
+UCSF HEALTH — DEPARTMENT OF CARDIOLOGY
+APPOINTMENT FOLLOW-UP NOTICE
+===================================
+
+Date: April 24, 2026
+From: Dr. Rafael Torres, MD — UCSF Cardiology
+Re: Margaret Lily Chen — Patient ID: MRN-4471829
+
+---
+
+Dear Care Team,
+
+This letter is a follow-up notice regarding Margaret Chen, who is a patient of record at UCSF Cardiology under my care.
+
+Ms. Chen's most recent cardiology visit was on June 2, 2025. Given her diagnosis of Congestive Heart Failure (CHF) and comorbid Type 2 diabetes, our standard protocol recommends follow-up every 6 months. She is now approximately 10 months past her last visit, placing her significantly outside the recommended interval.
+
+We attempted to contact Ms. Chen directly on:
+  - March 8, 2026 (no answer — voicemail left)
+  - March 22, 2026 (no answer — voicemail left)
+  - April 7, 2026 (call answered by a family member — follow-up inconclusive)
+
+We have open availability for the following appointment slots:
+  - May 2, 2026 at 10:00 AM
+  - May 7, 2026 at 2:30 PM
+  - May 14, 2026 at 9:00 AM
+
+Given her CHF status, we are flagging this as a priority scheduling case. Please coordinate with her care team to confirm one of the above slots as soon as possible.
+
+If transport is required, please note our patient services coordinator (Beatriz Santos, +1-415-476-1000 ext. 44) can assist with medical transport referrals.
+
+Sincerely,
+
+Dr. Rafael Torres, MD
+Director, Heart Failure & Transplant Program
+UCSF Medical Center — Cardiology
+505 Parnassus Avenue, San Francisco, CA 94143
+Phone: +1-415-476-1000 | Fax: +1-415-476-1122

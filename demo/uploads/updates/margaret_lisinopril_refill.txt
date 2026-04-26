@@ -1,0 +1,42 @@
+# TARGET: patient_id=pt_001 | POST /patients/pt_001/update/file
+# EXPECTED DOMAIN: health
+# EXPECTED ACTION: Medication refill coordination (Lisinopril), non-overdue, automation-ready
+
+===================================
+CAREGIVER MEDICATION REVIEW NOTE
+===================================
+
+Date: April 26, 2026
+Caregiver: Sarah Okafor
+Patient: Margaret Chen (pt_001)
+Visit time: 8:30 AM – 9:30 AM
+
+---
+MEDICATION STATUS
+---
+
+During routine medication reconciliation, Margaret reported she has only 2 tablets of
+Lisinopril 10mg left. She takes this daily for hypertension/CHF management.
+
+Current refill context:
+  - Medication: Lisinopril 10mg
+  - Remaining supply: 2 tablets
+  - Preferred pharmacy: CVS Mission St
+  - Clinical request: process refill now so there is no gap in therapy
+
+No acute symptoms were observed during this visit. This is a proactive refill request to
+avoid interruption of treatment.
+
+ACTION REQUESTED:
+Please initiate pharmacy refill coordination for Lisinopril 10mg today and confirm pickup
+or delivery details for care-team follow-up.
+
+---
+AUTOMATION_HINT
+---
+TARGET_ROUTE: POST /mock/cvs/refill
+REQUIRED_PARAMS:
+  medication: Lisinopril 10mg
+  patient_id: pt_001
+  pharmacy: CVS Mission St
+

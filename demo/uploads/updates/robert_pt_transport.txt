@@ -1,0 +1,48 @@
+# TARGET: patient_id=pt_002 | POST /patients/pt_002/update/file
+# EXPECTED DOMAIN: appointment (scheduling)
+# EXPECTED ACTION: PT appointment transport coordination — April 28 at 10:00 AM, tier_1
+
+===================================
+OAKLAND REHAB CENTER
+APPOINTMENT CONFIRMATION LETTER
+===================================
+
+Date: April 22, 2026
+To: Care Team of Robert Harris
+From: Patient Services, Oakland Rehab Center
+Re: Physical Therapy Appointment Confirmation — Robert Harris
+
+---
+
+Dear Care Coordinator,
+
+This letter confirms the upcoming physical therapy appointment for your client Robert Harris:
+
+APPOINTMENT DETAILS:
+  Date: Monday, April 28, 2026
+  Time: 10:00 AM
+  Location: Oakland Rehab Center
+             1200 Broadway, Oakland, CA 94612
+             Suite 300 (3rd floor — elevator available)
+  Therapist: Dr. Yolanda Moreno, PT, DPT
+  Session type: Post-hip replacement rehabilitation — session 14 of 16
+  Duration: Approximately 90 minutes
+
+TRANSPORT NOTE:
+Per our records, Mr. Harris has indicated he requires transport assistance to this appointment. His wife Carol Harris does not drive. We strongly recommend arranging transport in advance, as street parking at our location is limited and rideshare pickup on Broadway during morning hours can be delayed.
+
+PREPARATION:
+  - Mr. Harris should wear loose, comfortable clothing
+  - Bring his cane
+  - Arrive 10 minutes early for check-in
+  - No food restriction required for this session
+
+CANCELLATION POLICY:
+Cancellations must be made at least 24 hours in advance. Given this is session 14 of 16, any rescheduling will push the completion date by at least one week. Dr. Moreno has noted that Robert is making excellent progress and attendance consistency is critical.
+
+Please confirm transport arrangements are in place. Our scheduling desk can be reached at +1-510-555-3200.
+
+Warm regards,
+
+Patient Services
+Oakland Rehab Center

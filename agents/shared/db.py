@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -26,6 +27,11 @@ def get_connection(db_path: str | None = None) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(path)
     connection.row_factory = sqlite3.Row
+    try:
+        connection.execute("ALTER TABLE patient_updates ADD COLUMN proposed_changes TEXT")
+        connection.commit()
+    except sqlite3.OperationalError:
+        pass  # column already exists
     return connection
 
 
@@ -50,10 +56,26 @@ def init_db(schema_path: str = SCHEMA_PATH) -> None:
     schema = Path(schema_path).read_text(encoding="utf-8")
     with get_connection() as conn:
         conn.executescript(schema)
+        try:
+            conn.execute("ALTER TABLE action_history ADD COLUMN schedule TEXT")
+        except Exception:
+            pass  # column already exists
         conn.commit()
 
 
 # Org helpers
+def get_setup_status() -> dict[str, Any]:
+    with get_connection() as conn:
+        org = conn.execute("SELECT org_name FROM org_profile LIMIT 1").fetchone()
+        cg_count = conn.execute("SELECT COUNT(*) as n FROM caregivers").fetchone()["n"]
+        pt_count = conn.execute("SELECT COUNT(*) as n FROM patients").fetchone()["n"]
+    return {
+        "org_configured": bool(org and org["org_name"]),
+        "caregiver_count": cg_count,
+        "patient_count": pt_count,
+    }
+
+
 def get_org_profile() -> dict[str, Any]:
     with get_connection() as conn:
         row = conn.execute(
@@ -95,8 +117,70 @@ def get_all_patients() -> list[dict[str, Any]]:
     results = _rows_to_dicts(rows)
     for row in results:
         row["preferences_json"] = _json_load(row.get("preferences_json"), {})
-        row["life_graph_json"] = _json_load(row.get("life_graph_json"), {})
     return results
+
+
+def _normalize_person_name(name: str) -> str:
+    return " ".join((name or "").strip().split()).lower()
+
+
+def _name_tokens(text: str) -> list[str]:
+    return re.findall(r"[a-z]+", _normalize_person_name(text))
+
+
+def _name_token_matches(name_token: str, query_token: str) -> bool:
+    if not query_token:
+        return False
+    if name_token == query_token:
+        return True
+    return len(query_token) >= 3 and name_token.startswith(query_token)
+
+
+def find_active_patients_by_name(name: str) -> list[dict[str, Any]]:
+    """Return active patients whose name exactly matches (case/space-insensitive)."""
+    target = _normalize_person_name(name)
+    if not target:
+        return []
+    matches: list[dict[str, Any]] = []
+    for patient in get_all_patients():
+        if _normalize_person_name(str(patient.get("name", ""))) == target:
+            matches.append(patient)
+    return matches
+
+
+def find_active_patients_by_name_query(query: str) -> list[dict[str, Any]]:
+    """
+    Return active patients whose names are referenced in free text.
+
+    Matching rules:
+    - exact full-name phrase match, or
+    - partial token match (query token is a prefix of a patient name token)
+    """
+    normalized_query = _normalize_person_name(query)
+    if not normalized_query:
+        return []
+
+    query_tokens = _name_tokens(normalized_query)
+    if not query_tokens:
+        return []
+
+    matches: list[dict[str, Any]] = []
+    for patient in get_all_patients():
+        name = _normalize_person_name(str(patient.get("name", "")))
+        if not name:
+            continue
+
+        full_name_match = re.search(rf"(?<!\w){re.escape(name)}(?!\w)", normalized_query) is not None
+        name_tokens = _name_tokens(name)
+        partial_match = any(
+            _name_token_matches(name_token, query_token)
+            for name_token in name_tokens
+            for query_token in query_tokens
+        )
+
+        if full_name_match or partial_match:
+            matches.append(patient)
+    return matches
 
 
 def get_patient(patient_id: str) -> dict[str, Any]:
@@ -107,71 +191,400 @@ def get_patient(patient_id: str) -> dict[str, Any]:
     result = _row_to_dict(row)
     if result:
         result["preferences_json"] = _json_load(result.get("preferences_json"), {})
-        result["life_graph_json"] = _json_load(result.get("life_graph_json"), {})
     return result
 
 
 def write_patient(data: dict[str, Any]) -> str:
     patient_id = data.get("patient_id") or f"pt_{uuid4().hex[:8]}"
-    name = data.get("name", "Unknown Patient")
-    age = data.get("age")
-    address = data.get("address")
-    preferences = data.get("preferences", data.get("preferences_json", {}))
+    # Use None when preferences not explicitly provided so COALESCE preserves existing value
+    raw_prefs = data["preferences"] if "preferences" in data else data.get("preferences_json")
+    prefs_value = json.dumps(raw_prefs) if isinstance(raw_prefs, (dict, list)) else raw_prefs
+    name_val = data.get("name")
+    age_val = data.get("age")
+    addr_val = data.get("address")
+    active_val = data.get("active", 1)
     with get_connection() as conn:
         conn.execute(
             """
-            INSERT INTO patients (patient_id, name, age, address, preferences_json, life_graph_json, active)
-            VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, 1))
+            INSERT INTO patients (patient_id, name, age, address, preferences_json, active)
+            VALUES (?, COALESCE(?, 'Unknown Patient'), ?, ?, ?, COALESCE(?, 1))
             ON CONFLICT(patient_id) DO UPDATE SET
-                name=excluded.name,
-                age=excluded.age,
-                address=excluded.address,
-                preferences_json=excluded.preferences_json,
-                life_graph_json=excluded.life_graph_json,
+                name=COALESCE(?, name),
+                age=COALESCE(?, age),
+                address=COALESCE(?, address),
+                preferences_json=COALESCE(?, preferences_json),
                 active=excluded.active
             """,
             (
-                patient_id,
-                name,
-                age,
-                address,
-                json.dumps(preferences),
-                json.dumps(data),
-                data.get("active", 1),
+                patient_id, name_val, age_val, addr_val, prefs_value, active_val,
+                # ON CONFLICT binds — raw values so NULL means "don't overwrite"
+                name_val, age_val, addr_val, prefs_value,
             ),
         )
+
+        for med in data.get("medications", []):
+            med_id = med.get("med_id") or f"med_{uuid4().hex[:8]}"
+            adherence = med.get("adherence_log", med.get("adherence_log_json"))
+            conn.execute(
+                """
+                INSERT INTO medications (
+                    med_id, patient_id, name, dosage, frequency, prescriber,
+                    prescriber_email, pharmacy, pharmacy_email, last_refill,
+                    days_supply, refill_due, adherence_log_json, active
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 1))
+                ON CONFLICT(med_id) DO UPDATE SET
+                    patient_id=excluded.patient_id, name=excluded.name,
+                    dosage=excluded.dosage, frequency=excluded.frequency,
+                    prescriber=excluded.prescriber, prescriber_email=excluded.prescriber_email,
+                    pharmacy=excluded.pharmacy, pharmacy_email=excluded.pharmacy_email,
+                    last_refill=excluded.last_refill, days_supply=excluded.days_supply,
+                    refill_due=excluded.refill_due,
+                    adherence_log_json=excluded.adherence_log_json, active=excluded.active
+                """,
+                (
+                    med_id, patient_id, med.get("name"), med.get("dosage"), med.get("frequency"),
+                    med.get("prescriber"), med.get("prescriber_email"), med.get("pharmacy"),
+                    med.get("pharmacy_email"), med.get("last_refill"), med.get("days_supply"),
+                    med.get("refill_due"),
+                    json.dumps(adherence) if isinstance(adherence, (list, dict)) else adherence,
+                    med.get("active", 1),
+                ),
+            )
+
+        for appt in data.get("appointments", []):
+            appt_id = appt.get("appt_id") or f"appt_{uuid4().hex[:8]}"
+            conn.execute(
+                """
+                INSERT INTO appointments (
+                    appt_id, patient_id, provider, specialty, last_visit,
+                    next_scheduled, recommended_frequency_months,
+                    clinic_address, phone, clinic_email, active
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 1))
+                ON CONFLICT(appt_id) DO UPDATE SET
+                    patient_id=excluded.patient_id, provider=excluded.provider,
+                    specialty=excluded.specialty, last_visit=excluded.last_visit,
+                    next_scheduled=excluded.next_scheduled,
+                    recommended_frequency_months=excluded.recommended_frequency_months,
+                    clinic_address=excluded.clinic_address, phone=excluded.phone,
+                    clinic_email=excluded.clinic_email, active=excluded.active
+                """,
+                (
+                    appt_id, patient_id, appt.get("provider"), appt.get("specialty"),
+                    appt.get("last_visit"), appt.get("next_scheduled"),
+                    appt.get("recommended_frequency_months"), appt.get("clinic_address"),
+                    appt.get("phone"), appt.get("clinic_email"), appt.get("active", 1),
+                ),
+            )
+
+        for ec in data.get("emergency_contacts", []):
+            conn.execute(
+                """
+                INSERT INTO emergency_contacts (patient_id, name, relation, phone, active)
+                VALUES (?, ?, ?, ?, COALESCE(?, 1))
+                """,
+                (patient_id, ec.get("name"), ec.get("relation"), ec.get("phone"), ec.get("active", 1)),
+            )
+
+        for note in data.get("caregiver_notes", []):
+            conn.execute(
+                """
+                INSERT INTO caregiver_notes (patient_id, caregiver_id, date, note, active)
+                VALUES (?, ?, ?, ?, COALESCE(?, 1))
+                """,
+                (patient_id, note.get("caregiver_id"), note.get("date"), note.get("note"), note.get("active", 1)),
+            )
+
+        grocery = data.get("grocery")
+        if grocery:
+            dietary = grocery.get("dietary_restrictions", grocery.get("dietary_restrictions_json", []))
+            conn.execute(
+                """
+                INSERT INTO grocery (patient_id, dietary_restrictions_json, last_delivery)
+                VALUES (?, ?, ?)
+                ON CONFLICT(patient_id) DO UPDATE SET
+                    dietary_restrictions_json=excluded.dietary_restrictions_json,
+                    last_delivery=excluded.last_delivery
+                """,
+                (
+                    patient_id,
+                    json.dumps(dietary) if isinstance(dietary, (list, dict)) else dietary,
+                    grocery.get("last_delivery"),
+                ),
+            )
+            for staple in grocery.get("staples", []):
+                conn.execute(
+                    """
+                    INSERT INTO grocery_staples (patient_id, item, frequency_days, last_ordered, active)
+                    VALUES (?, ?, ?, ?, COALESCE(?, 1))
+                    """,
+                    (
+                        patient_id, staple.get("item"), staple.get("frequency_days"),
+                        staple.get("last_ordered"), staple.get("active", 1),
+                    ),
+                )
+
+        financial = data.get("financial", {})
+        for bill in financial.get("bills", []):
+            conn.execute(
+                """
+                INSERT INTO financial_bills (patient_id, name, amount, due_date, autopay, active)
+                VALUES (?, ?, ?, ?, COALESCE(?, 0), COALESCE(?, 1))
+                """,
+                (
+                    patient_id, bill.get("name"), bill.get("amount"), bill.get("due_date"),
+                    bill.get("autopay", 0), bill.get("active", 1),
+                ),
+            )
+
         conn.commit()
     return patient_id
 
 
 def serialize_life_graph(patient_id: str) -> dict[str, Any]:
-    patient = get_patient(patient_id)
-    if not patient:
-        return {}
-    snapshot = _json_load(patient.get("life_graph_json"), {})
-    snapshot["patient_id"] = patient_id
-    snapshot["name"] = snapshot.get("name", patient.get("name"))
-    snapshot["age"] = snapshot.get("age", patient.get("age"))
-    snapshot["address"] = snapshot.get("address", patient.get("address"))
-    snapshot["preferences"] = snapshot.get("preferences", patient.get("preferences_json", {}))
     with get_connection() as conn:
-        caregivers = conn.execute(
-            "SELECT caregiver_id FROM patient_caregivers WHERE patient_id=?",
+        patient_row = conn.execute(
+            "SELECT * FROM patients WHERE patient_id=? LIMIT 1", (patient_id,)
+        ).fetchone()
+        if not patient_row:
+            return {}
+        patient = dict(patient_row)
+
+        medications = _rows_to_dicts(
+            conn.execute(
+                "SELECT * FROM medications WHERE patient_id=? AND active=1", (patient_id,)
+            ).fetchall()
+        )
+        for m in medications:
+            m["adherence_log"] = _json_load(m.get("adherence_log_json"), [])
+
+        appointments = _rows_to_dicts(
+            conn.execute(
+                "SELECT * FROM appointments WHERE patient_id=? AND active=1", (patient_id,)
+            ).fetchall()
+        )
+
+        emergency_contacts = _rows_to_dicts(
+            conn.execute(
+                "SELECT * FROM emergency_contacts WHERE patient_id=? AND active=1", (patient_id,)
+            ).fetchall()
+        )
+
+        caregiver_notes = _rows_to_dicts(
+            conn.execute(
+                "SELECT * FROM caregiver_notes WHERE patient_id=? AND active=1", (patient_id,)
+            ).fetchall()
+        )
+
+        grocery_row = conn.execute(
+            "SELECT * FROM grocery WHERE patient_id=? LIMIT 1", (patient_id,)
+        ).fetchone()
+        grocery = dict(grocery_row) if grocery_row else {}
+        if grocery:
+            grocery["dietary_restrictions"] = _json_load(grocery.get("dietary_restrictions_json"), [])
+
+        grocery_staples = _rows_to_dicts(
+            conn.execute(
+                "SELECT * FROM grocery_staples WHERE patient_id=? AND active=1", (patient_id,)
+            ).fetchall()
+        )
+
+        financial_bills = _rows_to_dicts(
+            conn.execute(
+                "SELECT * FROM financial_bills WHERE patient_id=? AND active=1", (patient_id,)
+            ).fetchall()
+        )
+
+        financial_anomalies = _rows_to_dicts(
+            conn.execute(
+                "SELECT * FROM financial_anomalies WHERE patient_id=?", (patient_id,)
+            ).fetchall()
+        )
+
+        caregiver_ids = [
+            row["caregiver_id"]
+            for row in conn.execute(
+                "SELECT caregiver_id FROM patient_caregivers WHERE patient_id=?", (patient_id,)
+            ).fetchall()
+        ]
+
+    return {
+        "patient_id": patient_id,
+        "name": patient.get("name"),
+        "age": patient.get("age"),
+        "address": patient.get("address"),
+        "preferences": _json_load(patient.get("preferences_json"), {}),
+        "emergency_contacts": emergency_contacts,
+        "medications": medications,
+        "caregiver_notes": caregiver_notes,
+        "appointments": appointments,
+        "grocery": {**grocery, "staples": grocery_staples},
+        "financial": {
+            "bills": financial_bills,
+            "anomalies": financial_anomalies,
+        },
+        "assigned_caregivers": caregiver_ids,
+    }
+
+
+def serialize_complete_life_graph(patient_id: str) -> dict[str, Any]:
+    """
+    Build the complete life graph for a patient, including all linked entities.
+
+    Linked entities include caregivers/schedules, updates, actions, action chat,
+    notifications, and expiration notifications related to this patient.
+    """
+    with get_connection() as conn:
+        patient_row = conn.execute(
+            "SELECT * FROM patients WHERE patient_id=? LIMIT 1",
+            (patient_id,),
+        ).fetchone()
+        if not patient_row:
+            return {}
+
+        patient = dict(patient_row)
+        preferences = _json_load(patient.get("preferences_json"), {})
+
+        caregiver_links_rows = conn.execute(
+            """
+            SELECT patient_id, caregiver_id
+            FROM patient_caregivers
+            WHERE patient_id=?
+            ORDER BY caregiver_id ASC
+            """,
             (patient_id,),
         ).fetchall()
-    snapshot["assigned_caregivers"] = [row["caregiver_id"] for row in caregivers]
-    return snapshot
+        caregiver_links = _rows_to_dicts(caregiver_links_rows)
+        caregiver_ids = [row["caregiver_id"] for row in caregiver_links_rows]
+
+        caregivers: list[dict[str, Any]] = []
+        caregiver_schedule: list[dict[str, Any]] = []
+        if caregiver_ids:
+            placeholders = ",".join(["?"] * len(caregiver_ids))
+            caregivers = _rows_to_dicts(
+                conn.execute(
+                    f"""
+                    SELECT *
+                    FROM caregivers
+                    WHERE caregiver_id IN ({placeholders})
+                    ORDER BY caregiver_id ASC
+                    """,
+                    caregiver_ids,
+                ).fetchall()
+            )
+            caregiver_schedule = _rows_to_dicts(
+                conn.execute(
+                    f"""
+                    SELECT *
+                    FROM caregiver_schedule
+                    WHERE caregiver_id IN ({placeholders})
+                    ORDER BY date ASC, start_time ASC, id ASC
+                    """,
+                    caregiver_ids,
+                ).fetchall()
+            )
+
+        patient_updates = _rows_to_dicts(
+            conn.execute(
+                """
+                SELECT *
+                FROM patient_updates
+                WHERE patient_id=?
+                ORDER BY created_at DESC, id DESC
+                """,
+                (patient_id,),
+            ).fetchall()
+        )
+        for row in patient_updates:
+            row["fields_changed"] = _json_load(row.get("fields_changed"), [])
+
+        actions = _rows_to_dicts(
+            conn.execute(
+                """
+                SELECT *
+                FROM action_history
+                WHERE patient_id=?
+                ORDER BY created_at DESC, action_id ASC
+                """,
+                (patient_id,),
+            ).fetchall()
+        )
+        for row in actions:
+            row["api_payload"] = _json_load(row.get("api_payload"), None)
+        action_ids = [row["action_id"] for row in actions if row.get("action_id")]
+
+        action_chat: list[dict[str, Any]] = []
+        expiration_notifications: list[dict[str, Any]] = []
+        if action_ids:
+            placeholders = ",".join(["?"] * len(action_ids))
+            action_chat = _rows_to_dicts(
+                conn.execute(
+                    f"""
+                    SELECT *
+                    FROM action_chat
+                    WHERE action_id IN ({placeholders})
+                    ORDER BY id ASC
+                    """,
+                    action_ids,
+                ).fetchall()
+            )
+            expiration_notifications = _rows_to_dicts(
+                conn.execute(
+                    f"""
+                    SELECT *
+                    FROM expiration_notifications
+                    WHERE action_id IN ({placeholders})
+                    ORDER BY notified_at DESC, id DESC
+                    """,
+                    action_ids,
+                ).fetchall()
+            )
+
+        notifications = _rows_to_dicts(
+            conn.execute(
+                """
+                SELECT *
+                FROM notifications
+                WHERE patient_id=?
+                ORDER BY created_at DESC, id DESC
+                """,
+                (patient_id,),
+            ).fetchall()
+        )
+
+    return {
+        "patient": {
+            "patient_id": patient.get("patient_id"),
+            "name": patient.get("name"),
+            "age": patient.get("age"),
+            "address": patient.get("address"),
+            "active": patient.get("active", 1),
+            "created_at": patient.get("created_at"),
+            "preferences": preferences,
+        },
+        "assigned_caregivers": caregiver_ids,
+        "caregiver_links": caregiver_links,
+        "caregivers": caregivers,
+        "caregiver_schedule": caregiver_schedule,
+        "patient_updates": patient_updates,
+        "actions": actions,
+        "action_chat": action_chat,
+        "notifications": notifications,
+        "expiration_notifications": expiration_notifications,
+    }
 
 
 # Patient update helpers
 def write_patient_update(update: dict[str, Any]) -> int:
+    proposed = update.get("proposed_changes")
     with get_connection() as conn:
         cursor = conn.execute(
             """
             INSERT INTO patient_updates (
                 patient_id, caregiver_id, domain, operation, fields_changed,
-                summary, confirmed, applied
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                summary, proposed_changes, confirmed, applied
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 update.get("patient_id"),
@@ -180,9 +593,47 @@ def write_patient_update(update: dict[str, Any]) -> int:
                 update.get("operation"),
                 json.dumps(update.get("fields_changed", [])),
                 update.get("summary"),
+                json.dumps(proposed) if proposed is not None else None,
                 update.get("confirmed", 0),
                 update.get("applied", 0),
             ),
+        )
+        conn.commit()
+        return int(cursor.lastrowid)
+
+
+def append_ingest_audit_row(
+    patient_id: str,
+    *,
+    source: str,
+    detect_status: str,
+    filename: str | None = None,
+) -> int:
+    """
+    Log a completed ingest/merge in patient_updates (confirmed+applied) so
+    /patients/{id}/update-history can show intake alongside staged LLM updates.
+    """
+    if source == "file":
+        label = f"File intake ({filename or 'upload'})"
+    else:
+        label = "Text intake"
+    summary = f"{label} — record merged. Detection: {detect_status}."
+    meta: dict[str, Any] = {
+        "ingest": True,
+        "source": source,
+        "detect_status": detect_status,
+    }
+    if filename:
+        meta["filename"] = filename
+    with get_connection() as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO patient_updates (
+                patient_id, caregiver_id, domain, operation, fields_changed,
+                summary, proposed_changes, confirmed, applied
+            ) VALUES (?, NULL, 'general', ?, '[]', ?, ?, 1, 1)
+            """,
+            (patient_id, f"ingest_{source}", summary, json.dumps(meta)),
         )
         conn.commit()
         return int(cursor.lastrowid)
@@ -196,6 +647,7 @@ def get_patient_update(update_id: int) -> dict[str, Any]:
     result = _row_to_dict(row)
     if result:
         result["fields_changed"] = _json_load(result.get("fields_changed"), [])
+        result["proposed_changes"] = _json_load(result.get("proposed_changes"), {})
     return result
 
 
@@ -205,25 +657,77 @@ def confirm_patient_update(update_id: int) -> None:
         conn.commit()
 
 
+def deactivate_medication(med_id: str) -> None:
+    with get_connection() as conn:
+        conn.execute("UPDATE medications SET active=0 WHERE med_id=?", (med_id,))
+        conn.commit()
+
+
+def deactivate_appointment(appt_id: str) -> None:
+    with get_connection() as conn:
+        conn.execute("UPDATE appointments SET active=0 WHERE appt_id=?", (appt_id,))
+        conn.commit()
+
+
+def deactivate_caregiver_note(note_id: int) -> None:
+    with get_connection() as conn:
+        conn.execute("UPDATE caregiver_notes SET active=0 WHERE id=?", (note_id,))
+        conn.commit()
+
+
+def deactivate_grocery_staple(staple_id: int) -> None:
+    with get_connection() as conn:
+        conn.execute("UPDATE grocery_staples SET active=0 WHERE id=?", (staple_id,))
+        conn.commit()
+
+
+def deactivate_financial_bill(bill_id: int) -> None:
+    with get_connection() as conn:
+        conn.execute("UPDATE financial_bills SET active=0 WHERE id=?", (bill_id,))
+        conn.commit()
+
+
+# financial_anomalies intentionally omitted: it is a history/audit table with no active column;
+# anomaly rows are never removed via the patient-update path.
+_SUBTABLE_DEACTIVATORS = {
+    "medications": ("med_id", deactivate_medication),
+    "appointments": ("appt_id", deactivate_appointment),
+    "caregiver_notes": ("id", deactivate_caregiver_note),
+    "grocery_staples": ("id", deactivate_grocery_staple),
+    "financial_bills": ("id", deactivate_financial_bill),
+}
+
+
 def apply_patient_update(update_id: int, changes: dict[str, Any]) -> None:
     update = get_patient_update(update_id)
     if not update:
         return
     patient_id = update["patient_id"]
-    patient = get_patient(patient_id)
-    if not patient:
-        return
     operation = update.get("operation")
-    if operation == "remove" or changes.get("active") == 0 or changes.get("remove") is True:
+    if operation and str(operation).startswith("ingest_"):
+        return
+    if operation == "remove":
+        for table, (pk_field, deactivate_fn) in _SUBTABLE_DEACTIVATORS.items():
+            for item in changes.get(table, []):
+                if item.get("active") == 0 or pk_field in item:
+                    pk_val = item.get(pk_field)
+                    if pk_val is not None:
+                        deactivate_fn(pk_val)
+        if not any(changes.get(t) for t in _SUBTABLE_DEACTIVATORS):
+            with get_connection() as conn:
+                conn.execute("UPDATE patients SET active=0 WHERE patient_id=?", (patient_id,))
+        with get_connection() as conn:
+            conn.execute("UPDATE patient_updates SET applied=1 WHERE id=?", (update_id,))
+            conn.commit()
+        return
+    if changes.get("active") == 0 or changes.get("remove") is True:
         with get_connection() as conn:
             conn.execute("UPDATE patients SET active=0 WHERE patient_id=?", (patient_id,))
             conn.execute("UPDATE patient_updates SET applied=1 WHERE id=?", (update_id,))
             conn.commit()
         return
 
-    snapshot = serialize_life_graph(patient_id)
-    merged = {**snapshot, **changes}
-    write_patient(merged)
+    write_patient({"patient_id": patient_id, **changes})
     with get_connection() as conn:
         conn.execute("UPDATE patient_updates SET applied=1 WHERE id=?", (update_id,))
         conn.commit()
@@ -242,6 +746,7 @@ def get_patient_update_history(patient_id: str) -> list[dict[str, Any]]:
     results = _rows_to_dicts(rows)
     for row in results:
         row["fields_changed"] = _json_load(row.get("fields_changed"), [])
+        row["proposed_changes"] = _json_load(row.get("proposed_changes"), {})
     return results
 
 
@@ -252,16 +757,18 @@ def _action_id(action: dict[str, Any]) -> str:
 
 def write_action(action: dict[str, Any]) -> str:
     action_id = _action_id(action)
+    caregiver_options = action.get("caregiver_options_json")
     with get_connection() as conn:
         conn.execute(
             """
             INSERT INTO action_history (
                 action_id, patient_id, domain, type, description, draft_content, draft_version,
                 modification_in_progress, urgency_level, review_by, invocation_date, is_overdue,
-                escalation_count, reviewed, completed, manual_action_type, api_payload,
-                recipient_email, recipient_type, scheduling_status, last_modified_at
+                escalation_count, reviewed, completed, completion_date, assigned_caregiver,
+                caregiver_options_json, outcome, manual_action_type, api_payload,
+                recipient_email, recipient_type, email_subject, schedule, last_modified_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
             ON CONFLICT(action_id) DO UPDATE SET
                 patient_id=excluded.patient_id,
                 domain=excluded.domain,
@@ -277,12 +784,17 @@ def write_action(action: dict[str, Any]) -> str:
                 escalation_count=excluded.escalation_count,
                 reviewed=excluded.reviewed,
                 completed=excluded.completed,
+                completion_date=excluded.completion_date,
+                assigned_caregiver=excluded.assigned_caregiver,
+                caregiver_options_json=excluded.caregiver_options_json,
+                outcome=excluded.outcome,
                 manual_action_type=excluded.manual_action_type,
                 api_payload=excluded.api_payload,
                 recipient_email=excluded.recipient_email,
                 recipient_type=excluded.recipient_type,
-                scheduling_status=excluded.scheduling_status,
-                last_modified_at=datetime('now')
+                email_subject=excluded.email_subject,
+                schedule=excluded.schedule,
+                last_modified_at=strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
             """,
             (
                 action_id,
@@ -300,11 +812,16 @@ def write_action(action: dict[str, Any]) -> str:
                 action.get("escalation_count", 0),
                 action.get("reviewed", 0),
                 action.get("completed", 0),
+                action.get("completion_date"),
+                action.get("assigned_caregiver"),
+                json.dumps(caregiver_options) if isinstance(caregiver_options, (list, dict)) else caregiver_options,
+                action.get("outcome"),
                 action.get("manual_action_type"),
                 json.dumps(action.get("api_payload")) if action.get("api_payload") is not None else None,
                 action.get("recipient_email"),
                 action.get("recipient_type"),
-                action.get("scheduling_status"),
+                action.get("email_subject"),
+                json.dumps(action.get("schedule")) if action.get("schedule") is not None else None,
             ),
         )
         conn.commit()
@@ -353,7 +870,7 @@ def get_overdue_actions() -> list[dict[str, Any]]:
             WHERE completed=0
               AND is_overdue=0
               AND review_by IS NOT NULL
-              AND review_by < datetime('now')
+              AND review_by < strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
             ORDER BY review_by ASC
             """
         ).fetchall()
@@ -383,10 +900,12 @@ def update_action(action_id: str, updates: dict[str, Any]) -> None:
         payload["api_payload"] = (
             json.dumps(payload["api_payload"]) if payload["api_payload"] is not None else None
         )
+    if "caregiver_options_json" in payload and isinstance(payload["caregiver_options_json"], (list, dict)):
+        payload["caregiver_options_json"] = json.dumps(payload["caregiver_options_json"])
     set_clause = ", ".join([f"{key}=?" for key in payload.keys()])
     with get_connection() as conn:
         conn.execute(
-            f"UPDATE action_history SET {set_clause}, last_modified_at=datetime('now') WHERE action_id=?",
+            f"UPDATE action_history SET {set_clause}, last_modified_at=strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE action_id=?",
             [*payload.values(), action_id],
         )
         conn.commit()
@@ -399,7 +918,7 @@ def replace_draft(action_id: str, new_draft: str) -> None:
             UPDATE action_history
             SET draft_content=?,
                 draft_version=COALESCE(draft_version, 1) + 1,
-                last_modified_at=datetime('now'),
+                last_modified_at=strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
                 modification_in_progress=0
             WHERE action_id=?
             """,
@@ -433,6 +952,29 @@ def get_action_rankings() -> list[dict[str, Any]]:
         ),
         reverse=True,
     )
+
+
+def get_completed_autonomous_approved_actions(limit: int = 30) -> list[dict[str, Any]]:
+    """
+    Autonomous = no manual_action_type. Shown in the action feed after approval so
+    the dashboard can display stored approval_execution (mock API / email / gmaps) results.
+    """
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM action_history
+            WHERE completed = 1
+              AND (manual_action_type IS NULL OR TRIM(manual_action_type) = '')
+              AND IFNULL(outcome, '') = 'approved'
+            ORDER BY COALESCE(completion_date, last_modified_at, created_at) DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    results = _rows_to_dicts(rows)
+    for row in results:
+        row["api_payload"] = _json_load(row.get("api_payload"), None)
+    return results
 
 
 # Chat helpers
@@ -506,8 +1048,8 @@ def mark_notification_read(notification_id: int) -> None:
 def log_expiration_notification(action_id: str, channel: str) -> None:
     with get_connection() as conn:
         conn.execute(
-            "INSERT INTO expiration_notifications (action_id, channel) VALUES (?, ?)",
-            (action_id, channel),
+            "INSERT INTO expiration_notifications (action_id, notified_at, channel) VALUES (?, ?, ?)",
+            (action_id, datetime.utcnow().isoformat() + "Z", channel),
         )
         conn.commit()
 
@@ -584,21 +1126,79 @@ def get_caregiver_schedule(caregiver_id: str, start_date: str, end_date: str) ->
     return _rows_to_dicts(rows)
 
 
+_MANUAL_TYPE_TO_DOMAIN: dict[str, str] = {
+    "cvs_refill": "health",
+    "pharmacy_refill": "health",
+    "health_refill": "health",
+    "appointment_booking": "appointment",
+    "book_appointment": "appointment",
+    "clinic_booking": "appointment",
+    "grocery_delivery": "grocery",
+    "instacart_cart": "grocery",
+    "grocery_setup": "grocery",
+    "supply_reorder": "grocery",
+    "amazon_order": "grocery",
+    "amazon_reorder": "grocery",
+    "caregiver_availability": "appointment",
+    "transport": "appointment",
+    "financial_assessment": "financial",
+    "caregiver_assignment": "appointment",
+}
+
+
+def _normalize_domain_field(raw: Any) -> str | None:
+    if raw is None:
+        return None
+    s = str(raw).strip().lower()
+    if not s:
+        return None
+    if s in ("appointments", "appt", "appts", "scheduling_domain"):
+        return "appointment"
+    if s in ("health", "appointment", "grocery", "financial"):
+        return s
+    return s
+
+
+def _coalesce_action_domain_for_assignment_row(row: dict[str, Any]) -> str:
+    """Ensure a non-empty domain for dashboard assignment cards when DB value is null or legacy."""
+    d = _normalize_domain_field(row.get("domain"))
+    if d in ("health", "appointment", "grocery", "financial"):
+        return d
+    m = str(row.get("manual_action_type") or "").strip().lower().replace(" ", "_").replace("-", "_")
+    if m in _MANUAL_TYPE_TO_DOMAIN:
+        return _MANUAL_TYPE_TO_DOMAIN[m]
+    t = str(row.get("type") or "").strip().lower()
+    if t == "scheduling" or "appointment" in t or t in ("clinic_visit", "check_in", "caregiver_scheduling"):
+        return "appointment"
+    if "grocery" in t or "instacart" in t:
+        return "grocery"
+    if "financ" in t:
+        return "financial"
+    if d:
+        return d
+    return "health"
+
+
 def get_caregiver_assignments(caregiver_id: str) -> list[dict[str, Any]]:
     with get_connection() as conn:
         rows = conn.execute(
             """
-            SELECT p.patient_id, p.name,
-                   (SELECT COUNT(*) FROM action_history a
-                    WHERE a.patient_id=p.patient_id AND a.completed=0) AS pending_actions
-            FROM patient_caregivers pc
-            JOIN patients p ON p.patient_id = pc.patient_id
-            WHERE pc.caregiver_id=? AND p.active=1
-            ORDER BY p.name ASC
+            SELECT ah.action_id, ah.description, ah.type, ah.schedule,
+                   ah.domain, ah.urgency_level, ah.review_by, ah.draft_content,
+                   ah.manual_action_type,
+                   p.name AS patient_name, c.name AS caregiver_name
+            FROM action_history ah
+            JOIN patients p ON p.patient_id = ah.patient_id
+            JOIN caregivers c ON c.caregiver_id = ah.assigned_caregiver
+            WHERE ah.assigned_caregiver = ? AND ah.completed = 0
+            ORDER BY ah.created_at DESC
             """,
             (caregiver_id,),
         ).fetchall()
-    return _rows_to_dicts(rows)
+    out = _rows_to_dicts(rows)
+    for row in out:
+        row["domain"] = _coalesce_action_domain_for_assignment_row(row)
+    return out
 
 
 def get_caregiver_available_slots(date: str, duration_hours: float = 2.0) -> list[dict[str, Any]]:
@@ -616,6 +1216,84 @@ def get_caregiver_available_slots(date: str, duration_hours: float = 2.0) -> lis
             (date,),
         ).fetchall()
     return _rows_to_dicts(rows)
+
+
+def get_caregivers_available(start_time: str, end_time: str) -> list[dict[str, Any]]:
+    """Return caregivers with at least one available, unbooked slot overlapping [start_time, end_time]."""
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT c.caregiver_id, c.name, c.email, c.phone, c.role
+            FROM caregivers c
+            JOIN caregiver_schedule s ON s.caregiver_id = c.caregiver_id
+            WHERE s.available = 1 AND s.booked = 0
+              AND s.start_time < :end AND s.end_time > :start
+            ORDER BY c.name ASC
+            """,
+            {"start": start_time, "end": end_time},
+        ).fetchall()
+    return _rows_to_dicts(rows)
+
+
+def get_caregivers_by_workload() -> list[dict[str, Any]]:
+    """Return all caregivers ordered ascending by (assigned_actions + booked_slots)."""
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT c.caregiver_id, c.name, c.email, c.phone, c.role,
+                   (
+                     (SELECT COUNT(*) FROM action_history ah
+                      WHERE ah.assigned_caregiver = c.caregiver_id AND ah.completed = 0)
+                     +
+                     (SELECT COUNT(*) FROM caregiver_schedule cs
+                      WHERE cs.caregiver_id = c.caregiver_id AND cs.booked = 1)
+                   ) AS load
+            FROM caregivers c
+            ORDER BY load ASC, c.name ASC
+            """,
+        ).fetchall()
+    return _rows_to_dicts(rows)
+
+
+_DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+
+def create_caregiver(
+    name: str,
+    email: str,
+    phone: str,
+    role: str,
+    schedule: dict,  # {"Mon": {"start": "09:00", "end": "17:00"}, ...}
+) -> str:
+    import secrets
+    from datetime import date as _date, timedelta as _timedelta
+
+    caregiver_id = "cg_" + secrets.token_hex(3)
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT INTO caregivers (caregiver_id, name, email, phone, role) VALUES (?,?,?,?,?)",
+            (caregiver_id, name, email, phone, role),
+        )
+        today = _date.today()
+        for i in range(14):
+            target = today + _timedelta(days=i)
+            day_entry = schedule.get(_DAY_NAMES[target.weekday()])
+            conn.execute(
+                """
+                INSERT INTO caregiver_schedule
+                    (caregiver_id, date, start_time, end_time, available, booked)
+                VALUES (?, ?, ?, ?, ?, 0)
+                """,
+                (
+                    caregiver_id,
+                    target.isoformat(),
+                    day_entry["start"] if day_entry else None,
+                    day_entry["end"] if day_entry else None,
+                    1 if day_entry else 0,
+                ),
+            )
+        conn.commit()
+    return caregiver_id
 
 
 def book_caregiver_slot(caregiver_id: str, date: str) -> None:
@@ -653,3 +1331,154 @@ def get_scheduling_tasks() -> list[dict[str, Any]]:
         ),
         reverse=True,
     )
+
+
+def get_latest_pending_scheduling_action(requester_address: str) -> dict[str, Any] | None:
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM action_history
+            WHERE type='scheduling_task' AND completed=0
+            ORDER BY created_at DESC
+            """
+        ).fetchall()
+    for row in _rows_to_dicts(rows):
+        payload = _json_load(row.get("api_payload"), {})
+        if isinstance(payload, dict) and payload.get("requester_address") == requester_address:
+            row["api_payload"] = payload
+            return row
+    return None
+
+
+# ---------------------------------------------------------------------------
+# General chat session helpers
+# ---------------------------------------------------------------------------
+
+def create_session(session_id: str) -> str:
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO chat_sessions (id) VALUES (?)",
+            (session_id,),
+        )
+        conn.commit()
+    return session_id
+
+
+def write_chat_session_message(
+    session_id: str,
+    role: str,
+    content: str,
+    stage: str = "",
+    intent_class: str | None = None,
+    domain: str | None = None,
+    patient_ids: list[str] | None = None,
+    draft_action_id: str | None = None,
+) -> int:
+    with get_connection() as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO chat_messages
+              (session_id, role, content, stage, intent_class, domain, patient_ids, draft_action_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                session_id,
+                role,
+                content,
+                stage,
+                intent_class,
+                domain,
+                json.dumps(patient_ids) if patient_ids is not None else None,
+                draft_action_id,
+            ),
+        )
+        conn.commit()
+        return cursor.lastrowid  # type: ignore[return-value]
+
+
+def get_session_messages(session_id: str) -> list[dict[str, Any]]:
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT * FROM chat_messages WHERE session_id=? ORDER BY id ASC",
+            (session_id,),
+        ).fetchall()
+    msgs = _rows_to_dicts(rows)
+    for m in msgs:
+        m["patient_ids"] = _json_load(m.get("patient_ids"), [])
+    return msgs
+
+
+def session_exists(session_id: str) -> bool:
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT id FROM chat_sessions WHERE id=? LIMIT 1", (session_id,)
+        ).fetchone()
+    return row is not None
+
+
+def write_staged_action(session_id: str, draft_payload: dict[str, Any]) -> str:
+    draft_id = f"draft_{uuid4().hex[:12]}"
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO staged_actions (id, session_id, draft_payload, status)
+            VALUES (?, ?, ?, 'pending_approval')
+            """,
+            (draft_id, session_id, json.dumps(draft_payload)),
+        )
+        conn.commit()
+    return draft_id
+
+
+def get_staged_action(draft_id: str) -> dict[str, Any] | None:
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM staged_actions WHERE id=? LIMIT 1", (draft_id,)
+        ).fetchone()
+    if not row:
+        return None
+    result = _row_to_dict(row)
+    result["draft_payload"] = _json_load(result.get("draft_payload"), {})
+    return result
+
+
+def update_staged_action_payload(draft_id: str, draft_payload: dict[str, Any]) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE staged_actions SET draft_payload=? WHERE id=?",
+            (json.dumps(draft_payload), draft_id),
+        )
+        conn.commit()
+
+
+def update_staged_action_status(draft_id: str, status: str) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE staged_actions SET status=? WHERE id=?",
+            (status, draft_id),
+        )
+        conn.commit()
+
+
+def commit_staged_to_action_history(draft_id: str) -> str:
+    staged = get_staged_action(draft_id)
+    if not staged or staged.get("status") != "pending_approval":
+        raise ValueError(f"Staged action {draft_id!r} not found or not pending_approval")
+    payload = staged["draft_payload"]
+    action_id = write_action(payload)
+    update_staged_action_status(draft_id, "committed")
+    return action_id
+
+
+def expire_old_staged_actions(max_age_hours: int = 24) -> int:
+    with get_connection() as conn:
+        cursor = conn.execute(
+            """
+            UPDATE staged_actions SET status='discarded'
+            WHERE status='pending_approval'
+              AND created_at < datetime('now', ?)
+            """,
+            (f"-{max_age_hours} hours",),
+        )
+        conn.commit()
+        return cursor.rowcount

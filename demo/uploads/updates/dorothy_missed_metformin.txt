@@ -1,0 +1,49 @@
+# TARGET: patient_id=pt_003 | POST /patients/pt_003/update/file
+# EXPECTED DOMAIN: health
+# EXPECTED ACTION: Missed medication escalation — Metformin non-adherence, tier_0 urgency
+
+===================================
+SUNRISE CARE PARTNERS
+CAREGIVER DAILY OBSERVATION NOTE
+===================================
+
+Date: April 25, 2026
+Caregiver: James Reyes
+Patient: Dorothy Kim (pt_003)
+Visit time: 9:15 AM – 10:45 AM
+
+---
+VISIT SUMMARY
+---
+
+Arrived at 9:15 AM. Dorothy was awake and responsive. Home was tidy. Cat Miso was fed.
+
+MEDICATION REVIEW:
+Checked Dorothy's weekly pill organizer against the medication schedule on file.
+
+FINDINGS — CRITICAL:
+Dorothy's morning Metformin 1000mg slot has been empty for the following dates:
+  - Saturday, April 19 (missed AM + PM)
+  - Sunday, April 20 (missed AM)
+  - Monday, April 21 (missed AM + PM)
+  - Tuesday, April 22 (missed AM)
+
+That is 4 consecutive days with partial to full non-adherence on Metformin.
+
+Dorothy reports she "felt tired" and "didn't think it mattered for a few days." She showed visible fatigue today and reported mild dizziness when standing up from her chair (no fall occurred).
+
+Tiotropium inhaler was taken correctly per dorothy's account. Alendronate was taken Monday as scheduled.
+
+VITAL OBSERVATIONS:
+  - Appeared pale
+  - Mild orthostatic dizziness (stood slowly, stabilized quickly)
+  - No acute distress
+  - No chest pain, no shortness of breath beyond baseline
+
+ACTION TAKEN:
+Reminded Dorothy of the importance of Metformin for blood sugar control. She agreed to resume today. Administered this morning's dose (1000mg) at 9:45 AM with breakfast.
+
+RECOMMENDATION:
+This pattern of non-adherence requires formal escalation per the Missed Medication Protocol. Prescribing physician Dr. Ramos should be notified. A care coordinator check-in call is recommended within 24 hours.
+
+Caregiver signature: James Reyes

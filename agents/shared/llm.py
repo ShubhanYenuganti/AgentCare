@@ -7,6 +7,8 @@ import os
 
 import anthropic
 
+ANTHROPIC_MODEL = "claude-sonnet-4-6"
+
 
 def _client() -> anthropic.Anthropic:
     if not os.getenv("ANTHROPIC_API_KEY"):
@@ -23,7 +25,7 @@ def _extract_text(content: list[object]) -> str:
 
 def call_claude(system: str, user: str, max_tokens: int = 1000) -> str:
     response = _client().messages.create(
-        model="claude-sonnet-4-20250514",
+        model=ANTHROPIC_MODEL,
         max_tokens=max_tokens,
         system=system,
         messages=[{"role": "user", "content": user}],
@@ -39,7 +41,7 @@ def call_claude_json(system: str, user: str, max_tokens: int = 1000) -> dict:
 
 def call_claude_vision(b64_image: str, media_type: str, prompt: str) -> dict:
     response = _client().messages.create(
-        model="claude-sonnet-4-20250514",
+        model=ANTHROPIC_MODEL,
         max_tokens=1000,
         messages=[
             {

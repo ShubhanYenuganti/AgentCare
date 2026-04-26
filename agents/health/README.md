@@ -1,75 +1,42 @@
 # Health Agents
 
-This directory contains the **Health Supervisor** and **Health Worker** agents — a two-agent pipeline that handles all health-related queries in the Autocare multi-agent system. Health is the highest-priority domain (priority score: 10).
+Health domain is implemented as supervisor + worker and is the only domain that supports end-to-end modification in the current policy.
 
-## Triggered by keywords
+## Components
+- `health-supervisor` (port `8101`)
+- `health-worker` (port `8102`)
 
-`health`, `medication`, `pharmacy`, `refill`, `dose`
+## What this domain handles
+- Detection drafts for medication/refill/safety workflows.
+- Deterministic rule checks before LLM synthesis (refill windows, adherence risk, interaction/recall checks).
+- Question answering against patient life-graph context.
+- Modification pipeline for health actions.
 
----
+## Message contracts
+- Legacy compatibility (optional): `MockDomainTask` -> `MockWorkerResult` -> `MockSupervisorResult`
+  - gated by `SPRINT2_MOCK_FALLBACK=true`.
+- Production detection:
+  - `OnDemandDetectionRequest` -> worker
+  - `WorkerResult` -> supervisor
+  - `SupervisorResult` -> executor
+- Production modification:
+  - `ModificationRequest` -> `ModificationTask` -> `ModificationDraft` -> `ModificationResult`
+- Production question:
+  - `QuestionRequest` -> `QuestionTask` -> `QuestionApiResult` -> `QuestionAnswer`
 
-## Health Supervisor (`health-supervisor`)
+## Detection behavior
+- Supervisor filters snapshot context for health-relevant fields.
+- Worker runs deterministic rule checks and LLM synthesis.
+- Supervisor enforces action-type exclusivity and API payload validation.
+- Invalid API drafts trigger one correction retry before dropping invalid drafts.
+- Valid drafts are persisted via `write_action` and returned to executor.
 
-The supervisor is the domain coordinator. It receives a task from the Executor, stamps it with routing metadata, delegates it to the worker, and aggregates the worker result into a final `MockSupervisorResult` that is sent back to the Executor.
-
-### Message flow
-
-```
-Executor  →  MockDomainTask  →  Supervisor  →  MockDomainTask  →  Worker
-    ↑                                ↑                                 |
-    └──── MockSupervisorResult ──────┘◄────── MockWorkerResult ────────┘
-```
-
-### Port
-
-`8101`
-
----
-
-## Health Worker (`health-worker`)
-
-The worker performs the actual processing of the health query. It receives a delegated `MockDomainTask` from the supervisor, processes it, and returns a `MockWorkerResult`.
-
-### Port
-
-`8102`
-
----
-
-## Message schemas
-
-**`MockDomainTask`** (Executor → Supervisor → Worker)
-
-| Field | Type | Description |
-|---|---|---|
-| `request_id` | `str` | Unique request identifier |
-| `domain` | `str` | Must be `"health"` |
-| `query` | `str` | Free-text health query |
-| `user_sender_address` | `str \| None` | Return address for chat replies |
-| `metadata` | `dict \| None` | Routing context (supervisor stamps `health_supervisor: forwarded`) |
-
-**`MockWorkerResult`** (Worker → Supervisor)
-
-| Field | Type | Description |
-|---|---|---|
-| `request_id` | `str` | Echoed from the task |
-| `domain` | `str` | `"health"` |
-| `worker` | `str` | `"health-worker"` |
-| `result` | `str` | Processed result string |
-
-**`MockSupervisorResult`** (Supervisor → Executor)
-
-| Field | Type | Description |
-|---|---|---|
-| `request_id` | `str` | Echoed from the task |
-| `domain` | `str` | `"health"` |
-| `supervisor` | `str` | `"health-supervisor"` |
-| `result` | `str` | Final human-readable result |
+## External capability hooks
+- Mock pharmacy availability lookup (`/mock/cvs/available`) for context enrichment.
+- OpenFDA checks in worker (`interaction`, `recall`) for safety/risk augmentation.
 
 ## Running
-
-```
-# In separate terminals:
+```bash
 python -m agents.health.supervisor
 python -m agents.health.worker
 ```

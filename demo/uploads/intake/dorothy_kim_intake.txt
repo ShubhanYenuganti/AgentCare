@@ -1,0 +1,119 @@
+# TARGET: patient_id=pt_003 | POST /ingest/file
+# EXPECTED: Creates or updates patient Dorothy Kim with full life graph data
+
+===================================
+SUNRISE CARE PARTNERS
+CLIENT INTAKE FORM
+===================================
+
+Date of Intake: March 5, 2026
+Intake Coordinator: Sarah Okafor
+Form Version: 3.2
+
+---
+SECTION 1: PERSONAL INFORMATION
+---
+Full Name: Dorothy Mae Kim
+Date of Birth: November 22, 1954  |  Age: 71
+Gender: Female
+Address: 55 Maple Lane, Berkeley, CA 94710
+Phone: +1-510-555-0309
+Email: dorothy.kim@gmail.com
+Preferred Language: English
+
+---
+SECTION 2: EMERGENCY CONTACTS
+---
+Contact 1:
+  Name: Susan Kim (daughter)
+  Phone: +1-510-555-0311
+  Relationship: daughter
+
+Contact 2:
+  Name: James Kim (son)
+  Phone: +1-510-555-0422
+  Relationship: son
+
+---
+SECTION 3: MEDICAL CONDITIONS
+---
+Primary Diagnoses:
+  1. Type 2 Diabetes Mellitus — diagnosed 2016, currently managed with oral medication
+  2. COPD (Moderate, GOLD Stage 2) — diagnosed 2021
+  3. Osteoporosis — diagnosed 2023 (dual-energy X-ray 2023-10-08)
+
+Background: Dorothy is a retired nurse (UCSF, 1983–2014). She is highly health-literate. Medication adherence has been problematic since her previous caregiver, Maria, departed in late March 2026.
+
+Allergies:
+  - Latex: contact dermatitis
+  - Contrast dye (iodine-based): hypersensitivity — premedicate before imaging
+
+Last Physical Exam: November 30, 2025 (Dr. Elena Ramos, Berkeley Primary Care)
+
+---
+SECTION 4: CURRENT MEDICATIONS
+---
+1. Metformin 1000mg — twice daily (morning and evening with meals) — for diabetes
+   Last refill: 2026-02-10 | Next refill due: 2026-05-10
+   ADHERENCE NOTE: Missed doses observed April 18–25 per caregiver notes
+
+2. Tiotropium HandiHaler — once daily (morning) — for COPD
+   Last refill: 2026-03-01 | Next refill due: 2026-06-01
+
+3. Alendronate 70mg — once weekly (Monday mornings, 30 min before food) — for osteoporosis
+   Last refill: 2026-01-25 | Next refill due: 2026-04-25
+
+4. Vitamin D3 2000 IU — once daily — bone health/COPD
+
+---
+SECTION 5: UPCOMING APPOINTMENTS
+---
+1. Endocrinology follow-up
+   Provider: Dr. Samuel Lee, UCSF Endocrinology
+   Address: 1600 Divisadero St, San Francisco, CA 94115
+   Next scheduled: May 12, 2026 at 2:00 PM
+   Transport needed: YES (Dorothy does not drive due to COPD-related fatigue)
+   Duration: ~60 minutes
+
+2. Pulmonology check
+   Provider: Dr. Ramos, Berkeley Primary Care
+   Next scheduled: July 10, 2026
+   Transport needed: No (daughter Susan drives)
+
+---
+SECTION 6: GROCERY & DIETARY PREFERENCES
+---
+Diet type: Diabetic-friendly, low-glycemic
+Restrictions: No shellfish (allergy), limit simple carbohydrates
+Preferred delivery service: Safeway weekly delivery (Thursdays)
+Last delivery: April 13, 2026 (12 days ago — overdue)
+
+Staples:
+  - Low-glycemic bread (Dave's Killer Bread)
+  - Leafy greens (spinach, arugula)
+  - Chicken breast
+  - Almond milk (unsweetened)
+  - Blueberries, strawberries
+  - Brown rice
+  - Hummus
+  - Eggs
+
+---
+SECTION 7: FINANCIAL INFORMATION
+---
+Insurance: Medicare Part A + Part B + Part D
+Supplemental: Blue Cross MediGap
+
+Recurring bills:
+  - PG&E: ~$75/month, autopay
+  - AT&T landline: ~$35/month
+  - Safeway recurring grocery: ~$120/delivery
+
+---
+SECTION 8: CARE PREFERENCES & NOTES
+---
+Dorothy prefers to be addressed as "Dorothy" (not "Dot" or "Mrs. Kim").
+She will often second-guess medication timing — defer to the medication schedule on file, not her memory.
+Enjoys gardening; brief walks in the backyard are encouraged when weather permits.
+Prefers morning visits between 9am and noon.
+Has a cat named "Miso" — important to her emotional wellbeing; ensure cat has food/water during visits.

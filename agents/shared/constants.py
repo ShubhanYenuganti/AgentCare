@@ -52,6 +52,36 @@ ORG_CONTEXT_MAP = {
 # Detection only fires on these triggers (no scheduled loops on supervisors)
 DETECTION_TRIGGERS = ["patient_create", "patient_update"]
 
+# Domain detection capability audit map.
+DETECTION_DOMAIN_CAPABILITIES = {
+    "health": [
+        "medication checks",
+        "drug interaction risk review",
+        "prescription refill coordination",
+        "health monitoring and safety flags",
+    ],
+    "appointment": [
+        "transport arrangements",
+        "clinic/visit follow-ups",
+        "caregiver scheduling conflict checks",
+        "routine check-in reminders",
+    ],
+    "grocery": [
+        "grocery delivery setup and coverage",
+        "diet and preference mismatch checks",
+        "food safety and spoilage risk flags",
+        "medication-food interaction cues",
+        "weekly grocery planning support",
+    ],
+    "financial": [
+        "bill deadline and late-fee risk checks",
+        "autopay opportunity checks",
+        "insurance claims/coverage follow-up",
+        "benefits verification",
+        "financial assistance screening",
+    ],
+}
+
 # Modification pipeline: health domain only in v1
 MODIFICATION_ENABLED_DOMAINS = ["health"]
 

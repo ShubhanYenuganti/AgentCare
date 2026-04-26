@@ -28,5 +28,8 @@ financial-worker:
 scheduling:
 	python -m agents.scheduling.agent
 
+api:
+	python -m uvicorn api.main:app --host 0.0.0.0 --port 8000
+
 run-all:
 	python -m agents.run_all

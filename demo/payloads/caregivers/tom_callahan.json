@@ -1,0 +1,13 @@
+{
+  "name": "Tom Callahan",
+  "email": "tom.callahan@sunrisecare.org",
+  "phone": "+1-555-1005",
+  "role": "admin",
+  "schedule": {
+    "Mon": { "start": "09:00", "end": "17:00" },
+    "Tue": { "start": "09:00", "end": "17:00" },
+    "Wed": { "start": "09:00", "end": "17:00" },
+    "Thu": { "start": "09:00", "end": "17:00" },
+    "Fri": { "start": "09:00", "end": "15:00" }
+  }
+}

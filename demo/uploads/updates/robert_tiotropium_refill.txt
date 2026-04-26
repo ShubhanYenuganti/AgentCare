@@ -1,0 +1,40 @@
+# TARGET: patient_id=pt_002 | POST /patients/pt_002/update/file
+# EXPECTED DOMAIN: health
+# EXPECTED ACTION: Medication refill coordination (Tiotropium), non-overdue, automation-ready
+
+===================================
+CAREGIVER RESPIRATORY MEDICATION NOTE
+===================================
+
+Date: April 26, 2026
+Caregiver: James Reyes
+Patient: Robert Harris (pt_002)
+Visit time: 10:15 AM – 11:00 AM
+
+---
+MEDICATION STATUS
+---
+
+Robert's Tiotropium inhaler canister is nearly empty and should be refilled now to prevent
+any lapse in daily COPD maintenance therapy.
+
+Refill details:
+  - Medication: Tiotropium inhaler
+  - Remaining doses: low (estimated 1-2 days)
+  - Preferred pharmacy: CVS Mission St
+  - Request type: standard refill, no emergency escalation
+
+Robert denies acute respiratory distress today. This request is preventive and time-sensitive.
+
+ACTION REQUESTED:
+Submit Tiotropium refill request with CVS Mission St and log confirmation ID once accepted.
+
+---
+AUTOMATION_HINT
+---
+TARGET_ROUTE: POST /mock/cvs/refill
+REQUIRED_PARAMS:
+  medication: Tiotropium inhaler
+  patient_id: pt_002
+  pharmacy: CVS Mission St
+

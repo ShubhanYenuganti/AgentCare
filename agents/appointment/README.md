@@ -1,75 +1,36 @@
 # Appointment Agents
 
-This directory contains the **Appointment Supervisor** and **Appointment Worker** agents — a two-agent pipeline that handles all appointment-related queries in the Autocare multi-agent system.
+Appointment domain is implemented as supervisor + worker with production detection and question flows.
+Modification is explicitly not supported for this domain.
 
-## Triggered by keywords
+## Components
+- `appointment-supervisor` (port `8201`)
+- `appointment-worker` (port `8202`)
 
-`appointment`, `clinic`, `doctor`, `transport`, `visit`
+## What this domain handles
+- Appointment and transport-oriented detection actions.
+- Rule-assisted checks for overdue/near-term visits.
+- Scheduling/visit-prep drafts with caregiver-facing instructions.
+- Question answering over appointment context.
 
----
+## Message contracts
+- Legacy compatibility (optional): `MockDomainTask` path behind `SPRINT2_MOCK_FALLBACK=true`.
+- Production detection:
+  - `OnDemandDetectionRequest` -> `WorkerResult` -> `SupervisorResult`
+- Production modification:
+  - `ModificationRequest` returns `ModificationResult(not_supported)`
+- Production question:
+  - `QuestionRequest` -> `QuestionTask` -> `QuestionApiResult` -> `QuestionAnswer`
 
-## Appointment Supervisor (`appointment-supervisor`)
-
-The supervisor is the domain coordinator. It receives a task from the Executor, stamps it with routing metadata, delegates it to the worker, and aggregates the worker result into a final `MockSupervisorResult` that is sent back to the Executor.
-
-### Message flow
-
-```
-Executor  →  MockDomainTask  →  Supervisor  →  MockDomainTask  →  Worker
-    ↑                                ↑                                 |
-    └──── MockSupervisorResult ──────┘◄────── MockWorkerResult ────────┘
-```
-
-### Port
-
-`8201`
-
----
-
-## Appointment Worker (`appointment-worker`)
-
-The worker performs the actual processing of the appointment query. It receives a delegated `MockDomainTask` from the supervisor, processes it, and returns a `MockWorkerResult`.
-
-### Port
-
-`8202`
-
----
-
-## Message schemas
-
-**`MockDomainTask`** (Executor → Supervisor → Worker)
-
-| Field | Type | Description |
-|---|---|---|
-| `request_id` | `str` | Unique request identifier |
-| `domain` | `str` | Must be `"appointment"` |
-| `query` | `str` | Free-text appointment query |
-| `user_sender_address` | `str \| None` | Return address for chat replies |
-| `metadata` | `dict \| None` | Routing context (supervisor stamps `appointment_supervisor: forwarded`) |
-
-**`MockWorkerResult`** (Worker → Supervisor)
-
-| Field | Type | Description |
-|---|---|---|
-| `request_id` | `str` | Echoed from the task |
-| `domain` | `str` | `"appointment"` |
-| `worker` | `str` | `"appointment-worker"` |
-| `result` | `str` | Processed result string |
-
-**`MockSupervisorResult`** (Supervisor → Executor)
-
-| Field | Type | Description |
-|---|---|---|
-| `request_id` | `str` | Echoed from the task |
-| `domain` | `str` | `"appointment"` |
-| `supervisor` | `str` | `"appointment-supervisor"` |
-| `result` | `str` | Final human-readable result |
+## Detection behavior
+- Supervisor parses domain-specific snapshot context before worker dispatch.
+- Worker performs rule checks (including overdue/upcoming appointment signals) and LLM synthesis.
+- Worker may call mock calendar availability (`/mock/cal/available`) and gmaps helper for travel context.
+- Supervisor validates API payload templates and recipient metadata, with one correction retry.
+- Valid drafts are risk-scored, persisted, and returned to executor.
 
 ## Running
-
 ```bash
-# In separate terminals:
 python -m agents.appointment.supervisor
 python -m agents.appointment.worker
 ```

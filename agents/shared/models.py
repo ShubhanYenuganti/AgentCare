@@ -1,10 +1,54 @@
-"""Shared message contracts for the mock scaffold."""
+"""Shared message contracts for the MACOS multi-agent scaffold (Sprint 1 + Sprint 2)."""
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from uagents import Model
+
+# ---------------------------------------------------------------------------
+# Intent routing (Sprint 2)
+# ---------------------------------------------------------------------------
+
+IntentClass = Literal["question", "modification", "detection"]
+
+
+class IntentRoutingResult(Model):
+    """Output of the executor intent classifier."""
+
+    intent: IntentClass
+    domain: str | None  # None for broad detection/scheduling; set for single-domain detection
+    confidence: str  # "high" | "low"
+    trigger: str | None  # for detection: "patient_create" | "patient_update"
+    updated_fields: list[str] | None  # for patient_update pre-filter
+
+
+class DomainFanOutResult(Model):
+    """Per-domain outcome from a detection fan-out pass."""
+
+    domain: str
+    success: bool
+    actions: list[Any]  # list[ActionDraft] serialised
+    error: str | None
+    timed_out: bool
+
+
+class DetectionFanOutResult(Model):
+    """Aggregated result from a parallel detection fan-out (returned to executor)."""
+
+    pass_id: str
+    patient_id: str
+    domain_results: list[DomainFanOutResult]
+    partial: bool  # True if at least one domain timed out or failed
+
+
+class ExecutorErrorPayload(Model):
+    """Structured error returned from executor to ASI:One on failure."""
+
+    request_id: str
+    error_class: str  # "timeout" | "validation" | "downstream" | "internal"
+    message: str
+    domain: str | None
 
 
 class OnDemandDetectionRequest(Model):
@@ -15,6 +59,9 @@ class OnDemandDetectionRequest(Model):
     pass_id: str
     updated_domain: str | None
     org_context: dict[str, Any]
+    patient_snapshot: dict[str, Any]
+    snapshot_meta: dict[str, Any] | None = None
+    domain_patient_context: dict[str, Any] | None = None
 
 
 class ActionDraft(Model):
@@ -32,6 +79,8 @@ class ActionDraft(Model):
     api_payload: dict[str, Any] | None
     recipient_email: str | None
     recipient_type: str | None
+    email_subject: str | None = None
+    schedule: dict[str, Any] | None = None
 
 
 class WorkerResult(Model):
@@ -131,7 +180,7 @@ class QuestionTask(Model):
     patient_id: str
     domain: str
     question: str
-    api_lookup_instruction: str
+    api_lookup_instruction: str = ""
 
 
 class QuestionApiResult(Model):

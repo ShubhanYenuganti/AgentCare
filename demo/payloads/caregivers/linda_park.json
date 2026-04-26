@@ -1,0 +1,13 @@
+{
+  "name": "Linda Park",
+  "email": "linda.park@sunrisecare.org",
+  "phone": "+1-555-1003",
+  "role": "caregiver",
+  "schedule": {
+    "Tue": { "start": "07:00", "end": "15:00" },
+    "Wed": { "start": "07:00", "end": "15:00" },
+    "Thu": { "start": "07:00", "end": "15:00" },
+    "Fri": { "start": "07:00", "end": "15:00" },
+    "Sat": { "start": "09:00", "end": "13:00" }
+  }
+}
