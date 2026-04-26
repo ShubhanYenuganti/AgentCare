@@ -37,7 +37,9 @@ from agents.shared.db import (
     mark_action_overdue,
     serialize_complete_life_graph,
     update_action,
+    write_chat_message,
     write_notification,
+    write_patient,
 )
 from agents.shared.llm import call_claude_json
 from agents.shared.models import (
@@ -126,6 +128,7 @@ class HealthResponse(Model):
 
 class HttpMessagePost(Model):
     content: str
+    action_id: str | None = None
 
 
 class HttpMessageResponse(Model):
@@ -179,8 +182,13 @@ Classify the user's natural-language query into EXACTLY ONE of these intents:
 Also classify:
 
   domain       – The most relevant care domain: "health", "appointment",
-                 "grocery", or "financial". Use null for detection (fan-out to
-                 all domains) and scheduling.
+                 "grocery", or "financial".
+                 For detection: set the domain if the query clearly targets a
+                 single domain (e.g. "health check", "medication review",
+                 "missed dose", "grocery order", "bill payment"). Use null only
+                 when the query implies a broad full-patient scan or new patient
+                 onboarding (patient_create).
+                 For scheduling: always null.
 
   confidence   – "high" if the intent is clear, "low" if ambiguous.
 
@@ -326,6 +334,29 @@ def _extract_patient_id(query: str) -> str | None:
     return match.group(0).lower() if match else None
 
 
+def _resolve_patient_id_for_query(query: str, provided_patient_id: str | None) -> str | None:
+    """
+    Resolve a patient_id for question/modification routing.
+
+    Priority:
+    1. Explicitly provided patient_id.
+    2. Inline pt_XXX token in query text.
+    3. Name match against active patients in DB.
+    Returns None if unresolvable (caller falls back to "unknown").
+    """
+    if provided_patient_id:
+        return provided_patient_id
+    extracted = _extract_patient_id(query)
+    if extracted:
+        return extracted
+    candidates = find_active_patients_by_name_query(query)
+    if len(candidates) == 1:
+        return str(candidates[0]["patient_id"])
+    if len(candidates) > 1:
+        return str(candidates[0]["patient_id"])
+    return None
+
+
 def _resolve_detection_patient_id(
     query: str,
     provided_patient_id: str | None,
@@ -411,23 +442,32 @@ def _resolve_patient_create_snapshot(
 
 
 def _detection_domains_for_trigger(
-    trigger: str, updated_fields: list[str] | None
+    trigger: str,
+    updated_fields: list[str] | None,
+    domain_hint: str | None = None,
 ) -> list[str]:
     """
     Return the list of domains to fan out to.
 
-    - patient_create → all domains
-    - patient_update → field-based pre-filter (or all if no relevant fields found)
+    - patient_create → all domains (domain_hint ignored)
+    - explicit domain_hint → single domain
+    - updated_fields → field-based pre-filter
+    - fallback → all domains
     """
-    if trigger == "patient_create" or not updated_fields:
+    if trigger == "patient_create":
         return list(ALL_DETECTION_DOMAINS)
-    relevant: set[str] = set()
-    for field in updated_fields:
-        key = field.lower()
-        for map_key, domains in _FIELD_DOMAIN_MAP.items():
-            if map_key in key:
-                relevant.update(domains)
-    return list(relevant) if relevant else list(ALL_DETECTION_DOMAINS)
+    if domain_hint and domain_hint in ALL_DETECTION_DOMAINS:
+        return [domain_hint]
+    if updated_fields:
+        relevant: set[str] = set()
+        for field in updated_fields:
+            key = field.lower()
+            for map_key, domains in _FIELD_DOMAIN_MAP.items():
+                if map_key in key:
+                    relevant.update(domains)
+        if relevant:
+            return list(relevant)
+    return list(ALL_DETECTION_DOMAINS)
 
 
 # ---------------------------------------------------------------------------
@@ -458,12 +498,39 @@ async def _send_terminal_chat_response(ctx: Context, recipient: str, text: str) 
 # Routing dispatcher (Task 3.2)
 # ---------------------------------------------------------------------------
 
+_CONVERSATIONAL_REPLY_PROMPT = """\
+You are the voice of MACOS, a care-coordination assistant. The care team has just \
+processed a request and you need to send a short, conversational reply back to the \
+user. Write in first person as MACOS. Be warm, direct, and concise (2-4 sentences max). \
+Do not use bullet points or markdown. Do not repeat the raw action IDs or technical \
+field names. Focus on what was found or done and what happens next."""
+
+
+async def _generate_conversational_reply(original_query: str, result_summary: str) -> str:
+    """Call the LLM to turn a structured result summary into a conversational reply."""
+    user_message = f"Original request: {original_query}\n\nResult summary: {result_summary}"
+    try:
+        raw = await asyncio.to_thread(
+            call_claude_json,
+            _CONVERSATIONAL_REPLY_PROMPT + '\n\nRespond with ONLY a JSON object: {"reply": "<text>"}',
+            user_message,
+            300,
+        )
+        reply = raw.get("reply") or ""
+        if reply:
+            return reply
+    except Exception:
+        pass
+    return result_summary
+
+
 async def _route_query(
     ctx: Context,
     query: str,
     user_sender_address: str | None,
     patient_id: str | None = None,
     intent_override: IntentRoutingResult | None = None,
+    action_id: str | None = None,
 ) -> HttpMessageResponse:
     request_id = str(uuid4())
     intent = intent_override or await _classify_intent_with_llm(query)
@@ -473,26 +540,27 @@ async def _route_query(
 
     ctx.logger.info(
         "Intent classified request_id=%s intent=%s domain=%s confidence=%s "
-        "patient_id=%s user_sender=%s",
+        "patient_id=%s user_sender=%s action_id=%s",
         request_id,
         intent.intent,
         intent.domain,
         intent.confidence,
         resolved_patient_id or "none",
         user_sender_address or "none",
+        action_id or "none",
     )
 
     # --- Scheduling ---
     if intent.intent == "scheduling":
-        return await _dispatch_scheduling(ctx, request_id, query, user_sender_address, intent)
+        return await _dispatch_scheduling(ctx, request_id, query, user_sender_address, intent, action_id)
 
     # --- Modification ---
     if intent.intent == "modification":
-        return await _dispatch_modification(ctx, request_id, query, user_sender_address, intent, resolved_patient_id)
+        return await _dispatch_modification(ctx, request_id, query, user_sender_address, intent, resolved_patient_id, action_id)
 
     # --- Question ---
     if intent.intent == "question":
-        return await _dispatch_question(ctx, request_id, query, user_sender_address, intent, resolved_patient_id)
+        return await _dispatch_question(ctx, request_id, query, user_sender_address, intent, resolved_patient_id, action_id)
 
     # --- Detection (fan-out) ---
     return await _dispatch_detection(ctx, request_id, query, user_sender_address, intent, patient_id)
@@ -504,6 +572,7 @@ async def _dispatch_scheduling(
     query: str,
     user_sender_address: str | None,
     intent: IntentRoutingResult,
+    action_id: str | None = None,
 ) -> HttpMessageResponse:
     routed_address = SCHEDULING_AGENT_ADDRESS
     request_state.set_request(
@@ -515,6 +584,7 @@ async def _dispatch_scheduling(
             user_sender_address=user_sender_address,
             routed_address=routed_address,
             created_at=datetime.now(tz=timezone.utc),
+            action_id=action_id,
         )
     )
     task = MockDomainTask(
@@ -545,9 +615,11 @@ async def _dispatch_modification(
     user_sender_address: str | None,
     intent: IntentRoutingResult,
     patient_id: str | None,
+    action_id: str | None = None,
 ) -> HttpMessageResponse:
     domain = intent.domain or "health"
     supervisor_address = SUPERVISOR_ADDRESS_BY_DOMAIN.get(domain, SUPERVISOR_ADDRESS_BY_DOMAIN["health"])
+    resolved_pid = _resolve_patient_id_for_query(query, patient_id)
     request_state.set_request(
         PendingRequest(
             request_id=request_id,
@@ -557,11 +629,12 @@ async def _dispatch_modification(
             user_sender_address=user_sender_address,
             routed_address=supervisor_address,
             created_at=datetime.now(tz=timezone.utc),
+            action_id=action_id,
         )
     )
     mod_request = ModificationRequest(
         action_id=request_id,
-        patient_id=patient_id or "unknown",
+        patient_id=resolved_pid or "unknown",
         domain=domain,
         action_type="general",
         current_draft="",
@@ -589,9 +662,11 @@ async def _dispatch_question(
     user_sender_address: str | None,
     intent: IntentRoutingResult,
     patient_id: str | None,
+    action_id: str | None = None,
 ) -> HttpMessageResponse:
     domain = intent.domain or "health"
     supervisor_address = SUPERVISOR_ADDRESS_BY_DOMAIN.get(domain, SUPERVISOR_ADDRESS_BY_DOMAIN["health"])
+    resolved_pid = _resolve_patient_id_for_query(query, patient_id)
     request_state.set_request(
         PendingRequest(
             request_id=request_id,
@@ -601,11 +676,12 @@ async def _dispatch_question(
             user_sender_address=user_sender_address,
             routed_address=supervisor_address,
             created_at=datetime.now(tz=timezone.utc),
+            action_id=action_id,
         )
     )
     q_request = QuestionRequest(
         action_id=request_id,
-        patient_id=patient_id or "unknown",
+        patient_id=resolved_pid or "unknown",
         domain=domain,
         action_type="general",
         question=query,
@@ -626,6 +702,22 @@ async def _dispatch_question(
     )
 
 
+_PATIENT_EXTRACT_SYSTEM = """You are a patient intake assistant.
+Extract patient information from the provided text and return a JSON object with these fields
+(include only fields that are present in the text):
+  patient_id (optional override), name, age, address, preferences (object with any relevant details).
+You MUST return valid JSON only — no prose, no markdown fences."""
+
+
+async def _extract_and_write_patient(query: str, candidate_id: str) -> str:
+    """Extract patient data from query text and persist to SQLite. Returns patient_id."""
+    result = await asyncio.to_thread(
+        call_claude_json, _PATIENT_EXTRACT_SYSTEM, query, 1500
+    )
+    result["patient_id"] = candidate_id
+    return write_patient(result)
+
+
 async def _dispatch_detection(
     ctx: Context,
     request_id: str,
@@ -637,11 +729,26 @@ async def _dispatch_detection(
     """Fan out detection requests to multiple domain supervisors in parallel (Task 3.2)."""
     pass_id = request_id
     trigger = intent.trigger or "patient_update"
-    target_domains = _detection_domains_for_trigger(trigger, intent.updated_fields)
+    target_domains = _detection_domains_for_trigger(trigger, intent.updated_fields, domain_hint=intent.domain)
     if trigger == "patient_create":
+        candidate_id = patient_id or _extract_patient_id(query) or f"pt_create_{pass_id[:8]}"
+        if not get_patient(candidate_id):
+            try:
+                await _extract_and_write_patient(query, candidate_id)
+                ctx.logger.info(
+                    "[PARSE] patient_create wrote new patient to DB pass_id=%s patient_id=%s",
+                    pass_id,
+                    candidate_id,
+                )
+            except Exception as exc:
+                ctx.logger.warning(
+                    "[PARSE] patient_create extraction failed, proceeding with bootstrap pass_id=%s err=%s",
+                    pass_id,
+                    exc,
+                )
         pid, full_snapshot, snapshot_source = _resolve_patient_create_snapshot(
             query=query,
-            provided_patient_id=patient_id,
+            provided_patient_id=candidate_id,
             pass_id=pass_id,
         )
         ctx.logger.info(
@@ -714,6 +821,7 @@ async def _dispatch_detection(
         patient_id=pid,
         user_sender_address=user_sender_address,
         target_domains=target_domains,
+        original_query=query,
     )
     fan_out_state.register(fan_out)
 
@@ -818,7 +926,7 @@ async def health(_: Context) -> HealthResponse:
 @executor.on_rest_post("/message", HttpMessagePost, HttpMessageResponse)
 async def post_message(ctx: Context, req: HttpMessagePost) -> HttpMessageResponse:
     ctx.logger.info("Received REST /message content=%r", req.content)
-    return await _route_query(ctx, req.content, user_sender_address=None)
+    return await _route_query(ctx, req.content, user_sender_address=None, action_id=req.action_id)
 
 
 @executor.on_rest_post("/internal/detect", InternalDetectRequest, InternalDetectResponse)
@@ -947,7 +1055,6 @@ async def handle_mock_supervisor_result(
 ) -> None:
     """Backward-compatible mock result handler (still used by scheduling agent)."""
     pending = request_state.remove_request(result.request_id)
-    final_text = f"[{result.domain}] {result.result}"
     ctx.logger.info(
         "MockSupervisorResult sender=%s request_id=%s domain=%s",
         sender,
@@ -957,6 +1064,11 @@ async def handle_mock_supervisor_result(
     if pending is None:
         ctx.logger.warning("No pending state for request_id=%s", result.request_id)
         return
+    summary = f"Scheduling result ({result.domain}): {result.result}"
+    final_text = await _generate_conversational_reply(pending.query, summary)
+    if pending.action_id:
+        write_chat_message(pending.action_id, "assistant", final_text, intent="scheduling")
+        ctx.logger.info("Wrote assistant reply to action_chat action_id=%s", pending.action_id)
     if pending.user_sender_address:
         await _send_terminal_chat_response(ctx, pending.user_sender_address, final_text)
 
@@ -1017,9 +1129,13 @@ async def handle_question_answer(
     if pending is None:
         ctx.logger.warning("No pending state for action_id=%s", answer.action_id)
         return
-    response_text = answer.answer
+    raw_answer = answer.answer
     if answer.requires_action and answer.suggested_action:
-        response_text += f"\n\nSuggested action: {answer.suggested_action}"
+        raw_answer += f" Suggested next step: {answer.suggested_action}"
+    response_text = await _generate_conversational_reply(pending.query, raw_answer)
+    if pending.action_id:
+        write_chat_message(pending.action_id, "assistant", response_text, intent="question")
+        ctx.logger.info("Wrote assistant reply to action_chat action_id=%s", pending.action_id)
     if pending.user_sender_address:
         await _send_terminal_chat_response(ctx, pending.user_sender_address, response_text)
 
@@ -1039,10 +1155,11 @@ async def handle_modification_result(
     if pending is None:
         ctx.logger.warning("No pending state for action_id=%s", result.action_id)
         return
-    response_text = (
-        f"Modification complete. Summary: {result.changes_summary}\n"
-        f"Revised draft: {result.revised_draft}"
-    )
+    summary = f"Changes made: {result.changes_summary}. Updated draft: {result.revised_draft}"
+    response_text = await _generate_conversational_reply(pending.query, summary)
+    if pending.action_id:
+        write_chat_message(pending.action_id, "assistant", response_text, intent="modification")
+        ctx.logger.info("Wrote assistant reply to action_chat action_id=%s", pending.action_id)
     if pending.user_sender_address:
         await _send_terminal_chat_response(ctx, pending.user_sender_address, response_text)
 
@@ -1089,15 +1206,22 @@ async def _finalize_detection_fan_out(ctx: Context, fan_out: PendingFanOut) -> N
     )
 
     if fan_out.user_sender_address:
-        successful = [dr.domain for dr in domain_results if dr.success]
+        patient_row = get_patient(fan_out.patient_id)
+        patient_name = (patient_row.get("name") if patient_row else None) or fan_out.patient_id
+        successful = [dr for dr in domain_results if dr.success]
         failed = [dr.domain for dr in domain_results if not dr.success]
-        parts = [f"Detection complete for patient {fan_out.patient_id}."]
-        parts.append(f"Found {total_actions} action(s) across {len(successful)} domain(s): {', '.join(successful)}.")
+
+        summary_parts = [f"Patient: {patient_name}. Found {total_actions} proposed action(s)."]
+        for dr in successful:
+            descs = [a.get("description") or a.get("type") or "action" for a in dr.actions]
+            summary_parts.append(f"{dr.domain.capitalize()}: {'; '.join(descs[:3])}{'...' if len(descs) > 3 else ''}.")
         if failed:
-            parts.append(f"Domains with no response: {', '.join(failed)}.")
-        await _send_terminal_chat_response(
-            ctx, fan_out.user_sender_address, " ".join(parts)
+            summary_parts.append(f"No response from: {', '.join(failed)}.")
+
+        reply = await _generate_conversational_reply(
+            fan_out.original_query, " ".join(summary_parts)
         )
+        await _send_terminal_chat_response(ctx, fan_out.user_sender_address, reply)
 
 
 # ---------------------------------------------------------------------------

@@ -285,7 +285,7 @@ async def handle_detection_request(
     )
 
     ctx.logger.info(
-        "[LLM-CALL] domain=%s intent=detection patient_id=%s trigger=%s max_tokens=1000 "
+        "[LLM-CALL] domain=%s intent=detection patient_id=%s trigger=%s max_tokens=2000 "
         "system_preview=%r",
         _DOMAIN,
         msg.patient_id,
@@ -295,7 +295,7 @@ async def handle_detection_request(
 
     drafts: list[ActionDraft] = []
     try:
-        raw = call_claude_json(system_prompt, user_prompt, max_tokens=1000)
+        raw = call_claude_json(system_prompt, user_prompt, max_tokens=2000)
         raw_type = type(raw).__name__
         raw_len = len(raw) if isinstance(raw, (list, dict)) else 0
         ctx.logger.info(

@@ -6,8 +6,9 @@ Audit basis: `MACOS_build_spec_v7_final.md` compared against current code in `ag
 ## Snapshot
 
 - Sprint 1 foundation complete.
-- Sprint 2 data-layer + executor core complete (sections 1 and most of 2 done). Remaining Sprint 2 work: action-chat pipeline, full intent handler surface.
-- Sprint 3–11 contain major remaining work, especially deterministic domain logic, patient update pipeline, scheduling workflow, and full dashboard UX.
+- Sprint 2 complete: action-chat pipeline implemented (Section 2 fully done). Full intent handler surface alignment remains.
+- Section 3 (ingest + patient update pipeline) fully implemented.
+- Sprint 3–11 contain major remaining work, especially deterministic domain logic, scheduling workflow, and full dashboard UX.
 
 ## 1) Data Layer + Seed Gaps
 
@@ -26,18 +27,18 @@ Audit basis: `MACOS_build_spec_v7_final.md` compared against current code in `ag
 - [x] Inject domain-specific org context into each fan-out message using `ORG_CONTEXT_MAP` from DB org profile (currently fan-out sends empty org context).
 - [x] Implement spec expiration loop behavior on executor (`@on_interval(900)`): fetch overdue actions, mark overdue, dedupe notifications, write dashboard notifications, optional ASI:One push.
 - [x] Add scheduling-task post-processing in executor supervisor-result handler to set `scheduling_status="pending_approval"` for new scheduling tasks.
-- [ ] Implement action-chat processing endpoint/path (`/process-action-chat` equivalent) for API `POST /actions/{id}/chat`.
+- [x] Implement action-chat processing endpoint/path (`/process-action-chat` equivalent) for API `POST /actions/{id}/chat`.
 - [ ] Align intent handler surface with spec workflow: onboarding, scheduling query handling, action-bound modification/question handling, and general query fallback with DB-backed context.
 
 ## 3) Ingest + Patient Update Pipeline Gaps
 
-- [ ] Replace current `/ingest/text` proxy behavior with spec extraction flow: LLM extraction -> `write_patient()` -> immediate `internal/detect` trigger (`patient_create`).
-- [ ] Add `POST /ingest/file` with PDF extraction (`pdfplumber`) and image extraction (`call_claude_vision`) as defined in spec.
-- [ ] Implement `POST /patients/{id}/update` with classifier output: `domain`, `operation`, `fields_changed`, `summary`, `proposed_changes`.
-- [ ] Persist proposed changes in update records and return confirmation payload (`requires_confirmation=true`).
-- [ ] Implement `POST /patients/{id}/update/{update_id}/confirm` to apply staged changes and trigger `internal/detect` with `patient_update`.
-- [ ] Implement `POST /patients/{id}/update/file` using same staged-confirmation flow.
-- [ ] Implement `GET /patients/{id}/update-history`.
+- [x] Replace current `/ingest/text` proxy behavior with spec extraction flow: LLM extraction -> `write_patient()` -> immediate `internal/detect` trigger (`patient_create`).
+- [x] Add `POST /ingest/file` with PDF extraction (`pdfplumber`) and image extraction (`call_claude_vision`) as defined in spec.
+- [x] Implement `POST /patients/{id}/update` with classifier output: `domain`, `operation`, `fields_changed`, `summary`, `proposed_changes`.
+- [x] Persist proposed changes in update records and return confirmation payload (`requires_confirmation=true`).
+- [x] Implement `POST /patients/{id}/update/{update_id}/confirm` to apply staged changes and trigger `internal/detect` with `patient_update`.
+- [x] Implement `POST /patients/{id}/update/file` using same staged-confirmation flow.
+- [x] Implement `GET /patients/{id}/update-history`.
 - [ ] Ensure removal operations are soft-delete (`active=0`) across all normalized life-graph tables.
 
 ## 4) Domain Supervisor/Worker Logic Gaps

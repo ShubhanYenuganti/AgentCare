@@ -27,6 +27,11 @@ def get_connection(db_path: str | None = None) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(path)
     connection.row_factory = sqlite3.Row
+    try:
+        connection.execute("ALTER TABLE patient_updates ADD COLUMN proposed_changes TEXT")
+        connection.commit()
+    except sqlite3.OperationalError:
+        pass  # column already exists
     return connection
 
 
@@ -175,26 +180,29 @@ def get_patient(patient_id: str) -> dict[str, Any]:
 
 def write_patient(data: dict[str, Any]) -> str:
     patient_id = data.get("patient_id") or f"pt_{uuid4().hex[:8]}"
-    preferences = data.get("preferences", data.get("preferences_json", {}))
+    # Use None when preferences not explicitly provided so COALESCE preserves existing value
+    raw_prefs = data["preferences"] if "preferences" in data else data.get("preferences_json")
+    prefs_value = json.dumps(raw_prefs) if isinstance(raw_prefs, (dict, list)) else raw_prefs
+    name_val = data.get("name")
+    age_val = data.get("age")
+    addr_val = data.get("address")
+    active_val = data.get("active", 1)
     with get_connection() as conn:
         conn.execute(
             """
             INSERT INTO patients (patient_id, name, age, address, preferences_json, active)
-            VALUES (?, ?, ?, ?, ?, COALESCE(?, 1))
+            VALUES (?, COALESCE(?, 'Unknown Patient'), ?, ?, ?, COALESCE(?, 1))
             ON CONFLICT(patient_id) DO UPDATE SET
-                name=excluded.name,
-                age=excluded.age,
-                address=excluded.address,
-                preferences_json=excluded.preferences_json,
+                name=COALESCE(?, name),
+                age=COALESCE(?, age),
+                address=COALESCE(?, address),
+                preferences_json=COALESCE(?, preferences_json),
                 active=excluded.active
             """,
             (
-                patient_id,
-                data.get("name", "Unknown Patient"),
-                data.get("age"),
-                data.get("address"),
-                json.dumps(preferences) if isinstance(preferences, (dict, list)) else preferences,
-                data.get("active", 1),
+                patient_id, name_val, age_val, addr_val, prefs_value, active_val,
+                # ON CONFLICT binds — raw values so NULL means "don't overwrite"
+                name_val, age_val, addr_val, prefs_value,
             ),
         )
 
@@ -553,13 +561,14 @@ def serialize_complete_life_graph(patient_id: str) -> dict[str, Any]:
 
 # Patient update helpers
 def write_patient_update(update: dict[str, Any]) -> int:
+    proposed = update.get("proposed_changes")
     with get_connection() as conn:
         cursor = conn.execute(
             """
             INSERT INTO patient_updates (
                 patient_id, caregiver_id, domain, operation, fields_changed,
-                summary, confirmed, applied
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                summary, proposed_changes, confirmed, applied
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 update.get("patient_id"),
@@ -568,6 +577,7 @@ def write_patient_update(update: dict[str, Any]) -> int:
                 update.get("operation"),
                 json.dumps(update.get("fields_changed", [])),
                 update.get("summary"),
+                json.dumps(proposed) if proposed is not None else None,
                 update.get("confirmed", 0),
                 update.get("applied", 0),
             ),
@@ -584,6 +594,7 @@ def get_patient_update(update_id: int) -> dict[str, Any]:
     result = _row_to_dict(row)
     if result:
         result["fields_changed"] = _json_load(result.get("fields_changed"), [])
+        result["proposed_changes"] = _json_load(result.get("proposed_changes"), {})
     return result
 
 
@@ -625,6 +636,7 @@ def get_patient_update_history(patient_id: str) -> list[dict[str, Any]]:
     results = _rows_to_dicts(rows)
     for row in results:
         row["fields_changed"] = _json_load(row.get("fields_changed"), [])
+        row["proposed_changes"] = _json_load(row.get("proposed_changes"), {})
     return results
 
 

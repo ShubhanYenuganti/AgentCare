@@ -21,14 +21,17 @@ from agents.shared.api_capabilities import (
 from agents.shared.db import (
     get_action,
     get_action_rankings,
+    get_chat_history,
     get_pending_actions,
     update_action,
+    write_chat_message,
 )
 from agents.shared.notifications import send_action_notification
 
 router = APIRouter(prefix="/actions", tags=["actions"])
 
 APPROVE_TIMEOUT_SECONDS = 12.0
+EXECUTOR_INTERNAL_URL = os.getenv("EXECUTOR_INTERNAL_URL", "")
 logger = logging.getLogger(__name__)
 
 
@@ -132,6 +135,67 @@ async def complete_action(action_id: str):
         update_action(action_id, {"completed": 1})
         updated = get_action(action_id)
         return ok(updated)
+    except Exception as exc:
+        return JSONResponse(status_code=500, content=err(str(exc)))
+
+
+@router.post("/{action_id}/dismiss")
+async def dismiss_action(action_id: str):
+    try:
+        action = get_action(action_id)
+        if not action:
+            return JSONResponse(status_code=404, content=err(f"Action {action_id!r} not found"))
+        update_action(action_id, {
+            "completed": 1,
+            "reviewed": 1,
+            "completion_date": datetime.utcnow().isoformat(),
+            "outcome": "dismissed",
+        })
+        updated = get_action(action_id)
+        return ok(updated)
+    except Exception as exc:
+        return JSONResponse(status_code=500, content=err(str(exc)))
+
+
+class ChatMessageBody(BaseModel):
+    message: str
+
+
+@router.post("/{action_id}/chat")
+async def action_chat(action_id: str, body: ChatMessageBody):
+    if not EXECUTOR_INTERNAL_URL:
+        return JSONResponse(status_code=503, content=err("executor_not_configured"))
+    try:
+        action = get_action(action_id)
+        if not action:
+            return JSONResponse(status_code=404, content=err(f"Action {action_id!r} not found"))
+        chat_id = write_chat_message(action_id, "user", body.message)
+        context_prefix = (
+            f"[Action context] action_id={action_id} "
+            f"patient_id={action.get('patient_id')} "
+            f"domain={action.get('domain')} "
+            f"type={action.get('type')}\n\n"
+        )
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                await client.post(
+                    f"{EXECUTOR_INTERNAL_URL}/message",
+                    json={"content": context_prefix + body.message, "action_id": action_id},
+                )
+        except httpx.HTTPError:
+            return JSONResponse(status_code=502, content=err("executor_unavailable"))
+        return ok({"status": "queued", "chat_id": chat_id})
+    except Exception as exc:
+        return JSONResponse(status_code=500, content=err(str(exc)))
+
+
+@router.get("/{action_id}/chat-history")
+async def action_chat_history(action_id: str):
+    try:
+        action = get_action(action_id)
+        if not action:
+            return JSONResponse(status_code=404, content=err(f"Action {action_id!r} not found"))
+        return ok(get_chat_history(action_id))
     except Exception as exc:
         return JSONResponse(status_code=500, content=err(str(exc)))
 
@@ -414,6 +478,8 @@ async def approve_action(action_id: str):
         }
         if execution.get("success"):
             updates["completed"] = 1
+            updates["completion_date"] = datetime.utcnow().isoformat()
+            updates["outcome"] = "approved"
             if action.get("manual_action_type"):
                 updates["scheduling_status"] = "completed"
 

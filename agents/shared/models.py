@@ -17,7 +17,7 @@ class IntentRoutingResult(Model):
     """Output of the executor intent classifier."""
 
     intent: IntentClass
-    domain: str | None  # None for detection (fan-out) and scheduling
+    domain: str | None  # None for broad detection/scheduling; set for single-domain detection
     confidence: str  # "high" | "low"
     trigger: str | None  # for detection: "patient_create" | "patient_update"
     updated_fields: list[str] | None  # for patient_update pre-filter

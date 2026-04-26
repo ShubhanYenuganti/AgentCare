@@ -38,10 +38,11 @@ CREATE TABLE IF NOT EXISTS patient_updates (
   domain          TEXT,
   operation       TEXT,
   fields_changed  TEXT,
-  summary         TEXT,
-  confirmed       INTEGER DEFAULT 0,
-  applied         INTEGER DEFAULT 0,
-  created_at      TEXT DEFAULT (datetime('now'))
+  summary          TEXT,
+  proposed_changes TEXT,
+  confirmed        INTEGER DEFAULT 0,
+  applied          INTEGER DEFAULT 0,
+  created_at       TEXT DEFAULT (datetime('now'))
 );
 
 -- Caregiver registry

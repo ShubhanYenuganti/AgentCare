@@ -16,6 +16,7 @@ class PendingRequest:
     user_sender_address: str | None
     routed_address: str
     created_at: datetime
+    action_id: str | None = None  # set when request originates from POST /actions/{id}/chat
 
 
 class InMemoryRequestState:
@@ -64,6 +65,7 @@ class PendingFanOut:
     patient_id: str
     user_sender_address: str | None
     target_domains: list[str]
+    original_query: str = ""
     created_at: datetime = field(default_factory=lambda: datetime.now(tz=timezone.utc))
     # domain -> result dict (None means still pending)
     domain_results: dict[str, Any | None] = field(default_factory=dict)
