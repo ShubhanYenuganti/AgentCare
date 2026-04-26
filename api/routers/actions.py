@@ -156,10 +156,8 @@ async def patch_action(action_id: str, body: ActionModificationBody):
 
         # Idempotency check for modification_instruction
         if body.idempotency_key and body.modification_instruction:
-            existing_payload = action.get("api_payload") or {}
-            if isinstance(existing_payload, dict):
-                if existing_payload.get("idempotency_key") == body.idempotency_key:
-                    return ok(get_action(action_id))
+            if action.get("modification_idempotency_key") == body.idempotency_key:
+                return ok(get_action(action_id))
 
         updates: dict = {}
         if body.reviewed is not None:
@@ -173,10 +171,7 @@ async def patch_action(action_id: str, body: ActionModificationBody):
         if body.modification_instruction is not None:
             updates["modification_in_progress"] = 1
             if body.idempotency_key:
-                updates["api_payload"] = {
-                    "idempotency_key": body.idempotency_key,
-                    "modification_instruction": body.modification_instruction,
-                }
+                updates["modification_idempotency_key"] = body.idempotency_key
 
         if updates:
             update_action(action_id, updates)

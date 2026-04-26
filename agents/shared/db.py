@@ -56,10 +56,14 @@ def init_db(schema_path: str = SCHEMA_PATH) -> None:
     schema = Path(schema_path).read_text(encoding="utf-8")
     with get_connection() as conn:
         conn.executescript(schema)
-        try:
-            conn.execute("ALTER TABLE action_history ADD COLUMN schedule TEXT")
-        except Exception:
-            pass  # column already exists
+        for stmt in (
+            "ALTER TABLE action_history ADD COLUMN schedule TEXT",
+            "ALTER TABLE action_history ADD COLUMN modification_idempotency_key TEXT",
+        ):
+            try:
+                conn.execute(stmt)
+            except Exception:
+                pass  # column already exists
         conn.commit()
 
 

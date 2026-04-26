@@ -1,7 +1,3 @@
-# TARGET: patient_id=pt_003 | POST /patients/pt_003/update/file
-# EXPECTED DOMAIN: health
-# EXPECTED ACTION: Missed medication escalation — Metformin non-adherence, tier_0 urgency
-
 ===================================
 SUNRISE CARE PARTNERS
 CAREGIVER DAILY OBSERVATION NOTE

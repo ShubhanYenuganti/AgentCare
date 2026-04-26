@@ -146,3 +146,19 @@ def test_worker_api_capability_block_mentions_domain_routes_and_template():
     assert "GET /mock/cal/available" in block
     assert "POST /mock/cal/book" in block
     assert '"template_version": "v1"' in block
+
+
+def test_infer_primary_route_ignores_unrelated_payload_dict():
+    """Regression: a non-API action whose api_payload only carries modification
+    bookkeeping must not be mistaken for an executable mock call."""
+    route = infer_primary_route_for_action(
+        {
+            "domain": "health",
+            "manual_action_type": "health_assessment",
+            "api_payload": {
+                "idempotency_key": "idem-abc",
+                "modification_instruction": "change subject",
+            },
+        }
+    )
+    assert route is None

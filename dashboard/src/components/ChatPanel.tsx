@@ -191,68 +191,66 @@ export default function ChatPanel() {
     setMessages((prev) => prev.map((m) => (m.id === msgId ? { ...m, draft_action_id: null } : m)).concat(newMsg));
   }
 
+  /** Viewport height minus top bar and outer padding — one continuous sheet, inner thread scrolls. */
+  const chatViewportH = "calc(100vh - 56px - 2.75rem)";
+
   const CONTAINER: CSSProperties = {
     display: "flex",
     flexDirection: "column",
-    height: "calc(100vh - 56px)",
+    minHeight: "calc(100vh - 56px)",
     background: PAGE_BG,
     boxSizing: "border-box",
   };
 
-  const PAGE_COLUMN: CSSProperties = {
-    flex: 1,
+  const OUTER: CSSProperties = {
     display: "flex",
     flexDirection: "column",
-    minHeight: 0,
     width: "100%",
-    maxWidth: "min(880px, 100%)",
+    maxWidth: "min(1280px, 100%)",
     margin: "0 auto",
-    padding: "0 clamp(0.75rem, 3vw, 1.5rem)",
+    padding: "1.25rem clamp(1rem, 4vw, 2.5rem) 1.5rem",
     boxSizing: "border-box",
   };
 
-  const HEADER: CSSProperties = {
-    padding: "1.15rem 0 0.65rem",
-    flexShrink: 0,
-  };
-
-  const THREAD_SHELL: CSSProperties = {
-    flex: 1,
-    minHeight: 0,
+  const CHAT_SHEET: CSSProperties = {
     display: "flex",
     flexDirection: "column",
+    height: chatViewportH,
+    maxHeight: chatViewportH,
     borderRadius: 20,
-    border: "1px solid rgba(255, 255, 255, 0.65)",
-    background: "rgba(255, 255, 255, 0.55)",
+    border: "1px solid rgba(255, 255, 255, 0.7)",
+    background: "rgba(255, 255, 255, 0.58)",
     WebkitBackdropFilter: "blur(20px) saturate(170%)",
     backdropFilter: "blur(20px) saturate(170%)",
-    boxShadow: "0 14px 36px -14px rgba(15, 23, 42, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.9)",
+    boxShadow: "0 20px 48px -24px rgba(15, 23, 42, 0.14), inset 0 1px 0 rgba(255, 255, 255, 0.95)",
     overflow: "hidden",
+  };
+
+  const SHEET_HEADER: CSSProperties = {
+    flexShrink: 0,
+    padding: "1rem 1.25rem 0.9rem",
+    borderBottom: `1px solid ${BORDER_SOFT}`,
+    background: "linear-gradient(180deg, rgba(255, 255, 255, 0.55) 0%, rgba(245, 247, 250, 0.4) 100%)",
   };
 
   const THREAD: CSSProperties = {
     flex: 1,
+    minHeight: 0,
     overflowY: "auto",
-    padding: "1.25rem 1.15rem",
+    padding: "1.15rem 1.25rem",
     display: "flex",
     flexDirection: "column",
     gap: "1rem",
   };
 
-  const INPUT_BAR: CSSProperties = {
+  const SHEET_FOOTER: CSSProperties = {
     flexShrink: 0,
+    padding: "0.8rem 1.15rem 1rem",
     borderTop: `1px solid ${BORDER_SOFT}`,
-    background: "rgba(248, 250, 252, 0.92)",
-    WebkitBackdropFilter: "blur(12px)",
-    backdropFilter: "blur(12px)",
-    padding: "0.9rem clamp(0.75rem, 3vw, 1.5rem) 1.1rem",
-    display: "flex",
-    justifyContent: "center",
+    background: "linear-gradient(180deg, rgba(248, 250, 252, 0.65) 0%, rgba(255, 255, 255, 0.5) 100%)",
   };
 
-  const INPUT_INNER: CSSProperties = {
-    width: "100%",
-    maxWidth: "min(880px, 100%)",
+  const INPUT_ROW: CSSProperties = {
     display: "flex",
     gap: "0.65rem",
     alignItems: "flex-end",
@@ -260,37 +258,50 @@ export default function ChatPanel() {
 
   return (
     <div style={CONTAINER}>
-      <div style={PAGE_COLUMN}>
-        <header style={HEADER}>
-          <h1
-            style={{
-              margin: 0,
-              fontSize: "1.45rem",
-              fontWeight: 600,
-              letterSpacing: "-0.02em",
-              color: TEXT,
-            }}
-          >
-            Chat
-          </h1>
-          <p style={{ margin: "0.35rem 0 0", fontSize: "0.875rem", color: TEXT_MUTED, lineHeight: 1.45, maxWidth: "36rem" }}>
-            Ask about patients, care tasks, and unresolved actions. Long answers stay easy to read below.
-          </p>
-        </header>
+      <div style={OUTER}>
+        <div style={CHAT_SHEET}>
+          <header style={SHEET_HEADER}>
+            <h1
+              style={{
+                margin: 0,
+                fontSize: "1.2rem",
+                fontWeight: 650,
+                letterSpacing: "-0.02em",
+                color: TEXT,
+                lineHeight: 1.25,
+              }}
+            >
+              Chat
+            </h1>
+            <p
+              style={{
+                margin: "0.3rem 0 0",
+                fontSize: "0.8125rem",
+                color: TEXT_MUTED,
+                lineHeight: 1.45,
+              }}
+            >
+              Ask about patients, care tasks, and open actions. Drafts can appear in-thread when suggested.
+            </p>
+          </header>
 
-        <div style={THREAD_SHELL}>
           <div style={THREAD}>
             {messages.length === 0 && (
               <div
                 style={{
+                  flex: 1,
+                  display: "flex",
+                  flexDirection: "column",
+                  alignItems: "center",
+                  justifyContent: "center",
                   textAlign: "center",
-                  padding: "2.5rem 1rem 2rem",
+                  padding: "1.5rem 1.25rem 2rem",
                   color: TEXT_MUTED,
                 }}
               >
-                <p style={{ margin: 0, fontSize: "0.95rem", fontWeight: 500, color: "rgba(15, 23, 42, 0.7)" }}>Start a conversation</p>
-                <p style={{ margin: "0.5rem 0 0", fontSize: "0.85rem", lineHeight: 1.5 }}>
-                  Ask a question or describe an action. You can also create drafts from here when the assistant suggests one.
+                <p style={{ margin: 0, fontSize: "0.9rem", fontWeight: 600, color: "rgba(15, 23, 42, 0.72)" }}>Start a conversation</p>
+                <p style={{ margin: "0.4rem 0 0", fontSize: "0.8rem", lineHeight: 1.55, maxWidth: "22rem" }}>
+                  Type below — messages and replies stay in this panel.
                 </p>
               </div>
             )}
@@ -359,59 +370,60 @@ export default function ChatPanel() {
             })}
             <div ref={bottomRef} />
           </div>
-        </div>
-      </div>
 
-      <div style={INPUT_BAR}>
-        <div style={INPUT_INNER}>
-          <textarea
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder="Message AgentCare…"
-            rows={1}
-            disabled={sending}
-            style={{
-              flex: 1,
-              resize: "none",
-              border: `1px solid ${BORDER_SOFT}`,
-              borderRadius: 9999,
-              padding: "0.7rem 1.1rem",
-              fontSize: "0.9rem",
-              outline: "none",
-              background: sending ? "rgba(248, 250, 252, 0.9)" : "rgba(255, 255, 255, 0.95)",
-              color: TEXT,
-              lineHeight: 1.5,
-              maxHeight: "120px",
-              overflowY: "auto",
-              fontFamily: "inherit",
-              boxShadow: "inset 0 1px 1px rgba(15, 23, 42, 0.04)",
-            }}
-          />
-          <button
-            onClick={handleSend}
-            disabled={sending || !input.trim()}
-            type="button"
-            style={{
-              minWidth: "2.75rem",
-              height: "2.75rem",
-              padding: 0,
-              borderRadius: 9999,
-              border: "none",
-              background: sending || !input.trim() ? "rgba(226, 232, 240, 0.95)" : ACCENT,
-              color: sending || !input.trim() ? TEXT_MUTED : "#fff",
-              cursor: sending || !input.trim() ? "default" : "pointer",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              flexShrink: 0,
-              boxShadow:
-                sending || !input.trim() ? "none" : "0 2px 8px rgba(37, 99, 235, 0.28)",
-            }}
-            aria-label="Send"
-          >
-            <SendIcon />
-          </button>
+          <div style={SHEET_FOOTER}>
+            <div style={INPUT_ROW}>
+              <textarea
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={handleKeyDown}
+                placeholder="Message AgentCare…"
+                rows={1}
+                disabled={sending}
+                style={{
+                  flex: 1,
+                  minWidth: 0,
+                  resize: "none",
+                  border: `1px solid ${BORDER_SOFT}`,
+                  borderRadius: 9999,
+                  padding: "0.7rem 1.1rem",
+                  fontSize: "0.9rem",
+                  outline: "none",
+                  background: sending ? "rgba(248, 250, 252, 0.95)" : "rgba(255, 255, 255, 0.9)",
+                  color: TEXT,
+                  lineHeight: 1.5,
+                  maxHeight: "120px",
+                  overflowY: "auto",
+                  fontFamily: "inherit",
+                  boxShadow: "inset 0 1px 1px rgba(15, 23, 42, 0.04)",
+                }}
+              />
+              <button
+                onClick={handleSend}
+                disabled={sending || !input.trim()}
+                type="button"
+                style={{
+                  minWidth: "2.75rem",
+                  height: "2.75rem",
+                  padding: 0,
+                  borderRadius: 9999,
+                  border: "none",
+                  background: sending || !input.trim() ? "rgba(226, 232, 240, 0.95)" : ACCENT,
+                  color: sending || !input.trim() ? TEXT_MUTED : "#fff",
+                  cursor: sending || !input.trim() ? "default" : "pointer",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  flexShrink: 0,
+                  boxShadow:
+                    sending || !input.trim() ? "none" : "0 2px 8px rgba(37, 99, 235, 0.28)",
+                }}
+                aria-label="Send"
+              >
+                <SendIcon />
+              </button>
+            </div>
+          </div>
         </div>
       </div>
     </div>

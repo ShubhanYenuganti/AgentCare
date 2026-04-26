@@ -70,7 +70,8 @@ async def send_message(body: SendMessageBody):
     session_id = body.session_id
     if session_id:
         if not session_exists(session_id):
-            return JSONResponse(status_code=404, content=err(f"Session {session_id!r} not found"))
+            # Self-heal stale browser session ids after DB resets/reseeds.
+            create_session(session_id)
     else:
         session_id = str(uuid4())
         create_session(session_id)
@@ -129,7 +130,9 @@ async def send_message(body: SendMessageBody):
 @router.get("/history")
 async def get_history(session_id: str):
     if not session_exists(session_id):
-        return JSONResponse(status_code=404, content=err(f"Session {session_id!r} not found"))
+        # Self-heal stale browser session ids after DB resets/reseeds.
+        create_session(session_id)
+        return ok([])
     messages = get_session_messages(session_id)
     return ok([_format_message(m) for m in messages])
 
