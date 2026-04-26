@@ -1,21 +1,71 @@
-import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
-import { useLocation } from "react-router-dom";
+import { useLayoutEffect, useRef, useState, type CSSProperties } from "react";
+import { formatTimeRangeLocal } from "../utils/formatActionDate";
+import { useLocation, useNavigate } from "react-router-dom";
 import {
   useGetActionsQuery,
   useGetCaregiversQuery,
   useGetCaregiverScheduleQuery,
   useGetCaregiverAssignmentsQuery,
-  useAssignSchedulingMutation,
-  useConfirmSchedulingMutation,
-  useDeclineSchedulingMutation,
+  useGetCaregiversAvailableQuery,
+  useAssignCaregiverToActionMutation,
   useCreateCaregiverMutation,
 } from "../api/client";
-import type { Action, Caregiver, DaySchedule } from "../types";
-import ActionCard from "../components/ActionCard";
+import type { Action, Caregiver, CaregiverAssignment, CaregiverScheduleSlot, DaySchedule } from "../types";
 
-/** App shell / main content background (AppShell) */
+type ParsedActionSchedule = { start_time?: string; end_time?: string };
+
+function parseActionSchedule(raw: string | null | undefined): ParsedActionSchedule | null {
+  if (raw == null || raw === "") return null;
+  try {
+    const j = typeof raw === "string" ? JSON.parse(raw) : raw;
+    if (j && typeof j === "object") {
+      const st = (j as { start_time?: string; start?: string }).start_time ?? (j as { start?: string }).start;
+      const en = (j as { end_time?: string; end?: string }).end_time ?? (j as { end?: string }).end;
+      if (st || en) return { start_time: st, end_time: en };
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function calendarDateFromIso(iso: string): string | null {
+  const m = iso.trim().match(/^(\d{4}-\d{2}-\d{2})/);
+  return m ? m[1]! : null;
+}
+
+type BookingRow = {
+  action_id: string;
+  description: string;
+  patient_name: string;
+  start?: string;
+  end?: string;
+};
+
+function indexBookingsByDate(assignments: CaregiverAssignment[]): Map<string, BookingRow[]> {
+  const map = new Map<string, BookingRow[]>();
+  for (const a of assignments) {
+    const p = parseActionSchedule(a.schedule);
+    if (!p?.start_time) continue;
+    const d = calendarDateFromIso(p.start_time);
+    if (!d) continue;
+    const row: BookingRow = {
+      action_id: a.action_id,
+      description: a.description,
+      patient_name: a.patient_name,
+      start: p.start_time,
+      end: p.end_time,
+    };
+    const list = map.get(d) ?? [];
+    list.push(row);
+    map.set(d, list);
+  }
+  return map;
+}
+import { formatReviewByLocal } from "../utils/formatActionDate";
+import { urgencyDisplayLabel } from "../utils/urgencyLabels";
+
 const PAGE_BG = "#e8eaed";
-const STRIP_CARD_HIGHLIGHT = "rgba(99, 102, 241, 0.14)";
 const ROW_HOVER = "rgba(0, 0, 0, 0.04)";
 const ROW_SELECTED = "rgba(59, 130, 246, 0.08)";
 
@@ -23,233 +73,179 @@ const SLOT_AVAILABLE = "#dcfce7";
 const SLOT_BOOKED = "#dbeafe";
 const SLOT_UNAVAILABLE = "#fee2e2";
 
-// ── Scheduling task list ──────────────────────────────────────────────────────
+// ── Assignment panel ──────────────────────────────────────────────────────────
 
-function SchedulingStrip({
-  selectedActionId,
-  onSelect,
+function CaregiverAssignRow({
+  caregiver,
+  onAssign,
+  assigning,
 }: {
-  selectedActionId: string | null;
-  onSelect: (action: Action) => void;
+  caregiver: { caregiver_id: string; name: string };
+  onAssign: (id: string) => void;
+  assigning: boolean;
 }) {
-  const { data: actions = [] } = useGetActionsQuery();
-
-  const schedulingActions = actions.filter(
-    (a) => a.scheduling_status === "pending_approval" || a.scheduling_status === "unconfirmed"
-  );
-
-  if (schedulingActions.length === 0) {
-    return <p style={{ color: "#9ca3af", fontSize: "0.85rem", padding: "1rem" }}>No scheduling tasks pending.</p>;
-  }
-
   return (
-    <div style={{ display: "flex", flexDirection: "column" }}>
-      {schedulingActions.map((action) => {
-        const isSelected = action.action_id === selectedActionId;
-        return (
-          <button
-            key={action.action_id}
-            type="button"
-            data-testid="scheduling-row"
-            onClick={() => onSelect(action)}
-            style={{
-              display: "block",
-              width: "100%",
-              padding: "0.65rem 1rem",
-              textAlign: "left",
-              border: "none",
-              borderBottom: "1px solid #d1d5db",
-              borderLeft: isSelected ? "3px solid #6366f1" : "3px solid transparent",
-              background: isSelected ? STRIP_CARD_HIGHLIGHT : "transparent",
-              cursor: "pointer",
-              fontSize: "0.875rem",
-            }}
-          >
-            <div style={{ fontWeight: 500, color: "#111827", marginBottom: "0.2rem", lineHeight: 1.35 }}>
-              {action.description}
-            </div>
-            <div style={{ display: "flex", gap: "0.4rem", alignItems: "center", flexWrap: "wrap" }}>
-              {action.patient_name && (
-                <span style={{ fontSize: "0.72rem", color: "#6b7280" }}>{action.patient_name}</span>
-              )}
-              <span
-                style={{
-                  fontSize: "0.65rem",
-                  fontWeight: 600,
-                  padding: "1px 7px",
-                  borderRadius: "9999px",
-                  background: action.scheduling_status === "unconfirmed"
-                    ? "rgba(254, 240, 138, 0.6)"
-                    : "rgba(219, 234, 254, 0.8)",
-                  color: action.scheduling_status === "unconfirmed" ? "#854d0e" : "#1e40af",
-                  border: action.scheduling_status === "unconfirmed"
-                    ? "1px solid rgba(234, 179, 8, 0.35)"
-                    : "1px solid rgba(147, 197, 253, 0.6)",
-                }}
-              >
-                {action.scheduling_status === "unconfirmed" ? "Unconfirmed" : "Needs assignment"}
-              </span>
-            </div>
-          </button>
-        );
-      })}
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "space-between",
+        padding: "0.55rem 0.75rem",
+        borderBottom: "1px solid #e5e7eb",
+        fontSize: "0.875rem",
+      }}
+    >
+      <span style={{ color: "#111827", fontWeight: 500 }}>{caregiver.name}</span>
+      <button
+        type="button"
+        disabled={assigning}
+        onClick={() => onAssign(caregiver.caregiver_id)}
+        style={{
+          padding: "0.3rem 0.85rem",
+          borderRadius: "9999px",
+          border: "1px solid rgba(147, 197, 253, 0.95)",
+          background: assigning ? "rgba(209,213,219,0.8)" : "rgba(191,219,254,0.75)",
+          color: assigning ? "#6b7280" : "#0a0a0a",
+          cursor: assigning ? "not-allowed" : "pointer",
+          fontSize: "0.78rem",
+          fontWeight: 600,
+        }}
+      >
+        Assign
+      </button>
     </div>
   );
 }
 
-// ── Scheduling detail panel ───────────────────────────────────────────────────
+function AssignmentPanel({ action, onClose }: { action: Action; onClose: () => void }) {
+  const navigate = useNavigate();
+  const [assignCaregiver, { isLoading: assigning }] = useAssignCaregiverToActionMutation();
 
-function SchedulingDetailPanel({
-  action,
-  caregivers,
-}: {
-  action: Action;
-  caregivers: Caregiver[];
-}) {
-  const [assignScheduling, { isLoading: assigning }] = useAssignSchedulingMutation();
-  const [confirmScheduling, { isLoading: confirming }] = useConfirmSchedulingMutation();
-  const [declineScheduling, { isLoading: declining }] = useDeclineSchedulingMutation();
-  const [pickedCaregiver, setPickedCaregiver] = useState("");
+  const hasSchedule = Boolean(action.schedule?.start_time && action.schedule?.end_time);
+  const { data: available = [], isLoading } = useGetCaregiversAvailableQuery(
+    hasSchedule
+      ? { start_time: action.schedule!.start_time, end_time: action.schedule!.end_time }
+      : undefined
+  );
 
-  const busy = assigning || confirming || declining;
-  const assignedCaregiverName =
-    caregivers.find((c) => c.caregiver_id === action.assigned_caregiver)?.name ??
-    action.assigned_caregiver ?? "";
+  const handleAssign = async (caregiverId: string) => {
+    await assignCaregiver({ actionId: action.action_id, assigned_caregiver: caregiverId });
+    navigate("/");
+  };
 
   return (
-    <div style={{ padding: "1.5rem", overflowY: "auto", height: "100%", boxSizing: "border-box", background: PAGE_BG }}>
-      <ActionCard action={action} />
-
-      {action.scheduling_status === "pending_approval" && (
-        <div
-          style={{
-            marginTop: "1rem",
-            padding: "1rem 1.1rem",
-            borderRadius: "14px",
-            background: "#f5f6f8",
-            border: "1px solid #d1d5db",
-          }}
-        >
-          <div style={{ fontSize: "0.65rem", fontWeight: 600, letterSpacing: "0.12em", textTransform: "uppercase", color: "#4b5563", marginBottom: "0.65rem" }}>
-            Assign Caregiver
+    <div
+      style={{
+        boxSizing: "border-box",
+        padding: "1.5rem",
+        overflowY: "auto",
+        height: "100%",
+        background: PAGE_BG,
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: "1rem" }}>
+        <div>
+          <div style={{ fontSize: "0.65rem", fontWeight: 600, letterSpacing: "0.12em", textTransform: "uppercase", color: "#4b5563", marginBottom: "0.3rem" }}>
+            Schedule Task
           </div>
-          <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
-            <select
-              value={pickedCaregiver}
-              onChange={(e) => setPickedCaregiver(e.target.value)}
-              disabled={busy}
-              style={{
-                flex: 1,
-                minWidth: "160px",
-                border: "1px solid #d1d5db",
-                borderRadius: "8px",
-                padding: "0.4rem 0.6rem",
-                fontSize: "0.85rem",
-                background: "#fff",
-                color: "#111827",
-                cursor: busy ? "not-allowed" : "pointer",
-              }}
-            >
-              <option value="">Select caregiver…</option>
-              {caregivers.map((c) => (
-                <option key={c.caregiver_id} value={c.caregiver_id}>
-                  {c.name}{c.availability_today ? "" : " (unavailable today)"}
-                </option>
-              ))}
-            </select>
-            <button
-              type="button"
-              data-testid="assign-btn"
-              disabled={!pickedCaregiver || busy}
-              onClick={() => {
-                assignScheduling({ actionId: action.action_id, caregiver_id: pickedCaregiver });
-                setPickedCaregiver("");
-              }}
-              style={{
-                padding: "0.42rem 1.1rem",
-                borderRadius: "9999px",
-                border: "1px solid rgba(147, 197, 253, 0.95)",
-                background: !pickedCaregiver || busy ? "rgba(209, 213, 219, 0.8)" : "rgba(191, 219, 254, 0.75)",
-                color: !pickedCaregiver || busy ? "#6b7280" : "#0a0a0a",
-                cursor: !pickedCaregiver || busy ? "not-allowed" : "pointer",
-                fontSize: "0.8rem",
-                fontWeight: 600,
-              }}
-            >
-              {assigning ? "Assigning…" : "Assign"}
-            </button>
-          </div>
-        </div>
-      )}
-
-      {action.scheduling_status === "unconfirmed" && (
-        <div
-          style={{
-            marginTop: "1rem",
-            padding: "1rem 1.1rem",
-            borderRadius: "14px",
-            background: "#f5f6f8",
-            border: "1px solid #d1d5db",
-          }}
-        >
-          <div style={{ fontSize: "0.65rem", fontWeight: 600, letterSpacing: "0.12em", textTransform: "uppercase", color: "#4b5563", marginBottom: "0.5rem" }}>
-            Awaiting Confirmation
-          </div>
-          {assignedCaregiverName && (
-            <p style={{ margin: "0 0 0.65rem", fontSize: "0.85rem", color: "#374151" }}>
-              Assigned to <strong>{assignedCaregiverName}</strong>
+          <p style={{ margin: 0, fontSize: "1rem", fontWeight: 600, color: "#111827", lineHeight: 1.4 }}>
+            {action.description}
+          </p>
+          {action.patient_name && (
+            <p style={{ margin: "0.25rem 0 0", fontSize: "0.8rem", color: "#6b7280" }}>
+              {action.patient_name}
             </p>
           )}
-          <div style={{ display: "flex", gap: "0.5rem" }}>
-            <button
-              type="button"
-              data-testid="confirm-btn"
-              disabled={busy}
-              onClick={() => confirmScheduling(action.action_id)}
-              style={{
-                padding: "0.42rem 1.1rem",
-                borderRadius: "9999px",
-                border: "1px solid rgba(52, 211, 153, 0.6)",
-                background: busy ? "rgba(209, 213, 219, 0.8)" : "rgba(167, 243, 208, 0.65)",
-                color: busy ? "#6b7280" : "#065f46",
-                cursor: busy ? "not-allowed" : "pointer",
-                fontSize: "0.8rem",
-                fontWeight: 600,
-              }}
-            >
-              {confirming ? "Confirming…" : "Confirm"}
-            </button>
-            <button
-              type="button"
-              data-testid="decline-btn"
-              disabled={busy}
-              onClick={() => declineScheduling(action.action_id)}
-              style={{
-                padding: "0.42rem 1.1rem",
-                borderRadius: "9999px",
-                border: "1px solid rgba(248, 113, 113, 0.5)",
-                background: busy ? "rgba(209, 213, 219, 0.8)" : "rgba(254, 202, 202, 0.55)",
-                color: busy ? "#6b7280" : "#991b1b",
-                cursor: busy ? "not-allowed" : "pointer",
-                fontSize: "0.8rem",
-                fontWeight: 600,
-              }}
-            >
-              {declining ? "Declining…" : "Decline"}
-            </button>
-          </div>
+          {hasSchedule && (
+            <p style={{ margin: "0.35rem 0 0", fontSize: "0.78rem", color: "#374151" }}>
+              <span style={{ color: "#6b7280" }}>Window: </span>
+              {action.schedule!.start_time} – {action.schedule!.end_time}
+            </p>
+          )}
         </div>
-      )}
+        <button
+          type="button"
+          onClick={onClose}
+          style={{ background: "none", border: "none", cursor: "pointer", fontSize: "1.25rem", color: "#6b7280", lineHeight: 1, padding: "0 0.25rem" }}
+        >
+          ×
+        </button>
+      </div>
+
+      <div
+        style={{
+          marginTop: "0.5rem",
+          borderRadius: "14px",
+          background: "#f5f6f8",
+          border: "1px solid #d1d5db",
+          overflow: "hidden",
+        }}
+      >
+        <div
+          style={{
+            padding: "0.6rem 0.75rem",
+            borderBottom: "1px solid #e5e7eb",
+            fontSize: "0.65rem",
+            fontWeight: 600,
+            letterSpacing: "0.12em",
+            textTransform: "uppercase",
+            color: "#4b5563",
+          }}
+        >
+          {hasSchedule ? "Available Caregivers" : "Caregivers by Workload"}
+        </div>
+
+        {isLoading && (
+          <p style={{ margin: 0, padding: "1rem", fontSize: "0.85rem", color: "#6b7280" }}>Loading…</p>
+        )}
+
+        {!isLoading && available.length === 0 && hasSchedule && (
+          <p style={{ margin: 0, padding: "1rem", fontSize: "0.85rem", color: "#9ca3af" }}>
+            No caregivers available in that window. All caregivers shown below.
+          </p>
+        )}
+
+        {!isLoading &&
+          available.map((c) => (
+            <CaregiverAssignRow key={c.caregiver_id} caregiver={c} onAssign={handleAssign} assigning={assigning} />
+          ))}
+      </div>
     </div>
   );
 }
 
-// ── 14-day schedule grid (task 5.3) ───────────────────────────────────────────
+// ── 14-day schedule grid ──────────────────────────────────────────────────────
 
 function scheduleSlotColor(status: "available" | "booked" | "unavailable"): string {
   if (status === "booked") return SLOT_BOOKED;
   if (status === "unavailable") return SLOT_UNAVAILABLE;
   return SLOT_AVAILABLE;
+}
+
+/** API returns `caregiver_schedule` rows with `available` / `booked`, not `status`. */
+function deriveSlotStatus(slot: CaregiverScheduleSlot): "available" | "booked" | "unavailable" {
+  const explicit = slot.status;
+  if (explicit === "booked" || explicit === "unavailable" || explicit === "available") {
+    return explicit;
+  }
+  if (Number(slot.booked) === 1) return "booked";
+  if (Number(slot.available) === 0) return "unavailable";
+  return "available";
+}
+
+function stripHms(t: string): string {
+  const m = t.trim().match(/^(\d{1,2}:\d{2})(?::\d{2})?/);
+  return m ? m[1]! : t.trim();
+}
+
+/** Prefer explicit `shift`; else format DB `start_time` / `end_time` (e.g. seed `08:00`–`16:00`), or "Off" when not working. */
+function formatSlotShiftLabel(slot: CaregiverScheduleSlot): string {
+  if (slot.shift) return slot.shift;
+  const s = slot.start_time?.trim();
+  const e = slot.end_time?.trim();
+  if (s && e) return `${stripHms(s)}–${stripHms(e)}`;
+  if (!s && !e) return "Off";
+  return stripHms(s || e || "—");
 }
 
 function ScheduleLegend() {
@@ -259,29 +255,10 @@ function ScheduleLegend() {
     { label: "Unavailable", color: SLOT_UNAVAILABLE },
   ];
   return (
-    <div
-      style={{
-        display: "flex",
-        flexWrap: "wrap",
-        gap: "0.75rem",
-        marginBottom: "0.75rem",
-        fontSize: "0.7rem",
-        color: "#6b7280",
-      }}
-    >
+    <div style={{ display: "flex", flexWrap: "wrap", gap: "0.75rem", marginBottom: "0.75rem", fontSize: "0.7rem", color: "#6b7280" }}>
       {items.map(({ label, color }) => (
         <span key={label} style={{ display: "inline-flex", alignItems: "center", gap: "0.35rem" }}>
-          <span
-            style={{
-              width: 10,
-              height: 10,
-              borderRadius: 2,
-              background: color,
-              border: "1px solid rgba(0,0,0,0.06)",
-              flexShrink: 0,
-            }}
-            aria-hidden
-          />
+          <span style={{ width: 10, height: 10, borderRadius: 2, background: color, border: "1px solid rgba(0,0,0,0.06)", flexShrink: 0 }} aria-hidden />
           {label}
         </span>
       ))}
@@ -291,72 +268,258 @@ function ScheduleLegend() {
 
 function ScheduleGrid({ caregiverId }: { caregiverId: string }) {
   const { data: slots = [], isLoading } = useGetCaregiverScheduleQuery(caregiverId);
+  const { data: assignments = [] } = useGetCaregiverAssignmentsQuery(caregiverId);
+  const [openBookedDate, setOpenBookedDate] = useState<string | null>(null);
+  const bookingsByDate = indexBookingsByDate(assignments);
 
-  if (isLoading) {
-    return (
-      <div style={{ minHeight: "5rem", display: "flex", alignItems: "center" }}>
-        <p style={{ margin: 0, fontSize: "0.85rem", color: "#6b7280" }}>Loading schedule…</p>
-      </div>
-    );
-  }
-  if (slots.length === 0) {
-    return (
-      <div style={{ minHeight: "3rem" }}>
-        <p style={{ margin: 0, fontSize: "0.85rem", color: "#9ca3af" }}>No schedule data.</p>
-      </div>
-    );
-  }
+  if (isLoading) return <p style={{ margin: 0, fontSize: "0.85rem", color: "#6b7280" }}>Loading schedule…</p>;
+  if (slots.length === 0) return <p style={{ margin: 0, fontSize: "0.85rem", color: "#9ca3af" }}>No schedule data.</p>;
+
+  const openSlot = openBookedDate ? slots.find((s) => s.date === openBookedDate) : undefined;
+  const openStatus = openSlot ? deriveSlotStatus(openSlot) : null;
+  const openBookings = openBookedDate ? bookingsByDate.get(openBookedDate) ?? [] : [];
+  const openShift = openSlot ? formatSlotShiftLabel(openSlot) : "";
 
   return (
     <div>
       <ScheduleLegend />
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(7, minmax(0, 1fr))",
-          gap: "6px",
-          maxWidth: "100%",
-        }}
-      >
-        {slots.map((slot, i) => (
-          <div
-            key={i}
-            title={`${slot.date} ${slot.shift}`}
-            style={{
-              minHeight: "2.6rem",
-              padding: "6px 4px",
-              backgroundColor: scheduleSlotColor(slot.status),
-              borderRadius: "6px",
-              fontSize: "0.7rem",
-              textAlign: "center",
-              color: "#374151",
-              display: "flex",
-              flexDirection: "column",
-              justifyContent: "center",
-              alignItems: "center",
-              boxSizing: "border-box" as const,
-            }}
-          >
-            <div style={{ fontWeight: 600, lineHeight: 1.2 }}>{slot.date.slice(5)}</div>
-            <div style={{ color: "#4b5563", fontSize: "0.65rem", lineHeight: 1.2, marginTop: 2 }}>{slot.shift}</div>
-          </div>
-        ))}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(0, 1fr))", gap: "6px", maxWidth: "100%" }}>
+        {slots.map((slot) => {
+          const st = deriveSlotStatus(slot);
+          const shift = formatSlotShiftLabel(slot);
+          const isBooked = st === "booked";
+          const isOpen = isBooked && openBookedDate === slot.date;
+          return (
+            <div
+              key={slot.date}
+              role={isBooked ? "button" : undefined}
+              tabIndex={isBooked ? 0 : undefined}
+              onClick={() => {
+                if (!isBooked) {
+                  return;
+                }
+                setOpenBookedDate((d) => (d === slot.date ? null : slot.date));
+              }}
+              onKeyDown={(e) => {
+                if (!isBooked) return;
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  setOpenBookedDate((d) => (d === slot.date ? null : slot.date));
+                }
+              }}
+              title={
+                isBooked
+                  ? `${slot.date} · Booked · ${shift} — click for visit time`
+                  : `${slot.date} · ${st} · ${shift}`
+              }
+              style={{
+                minHeight: "2.6rem",
+                padding: "6px 4px",
+                backgroundColor: scheduleSlotColor(st),
+                borderRadius: "6px",
+                fontSize: "0.7rem",
+                textAlign: "center",
+                color: "#374151",
+                display: "flex",
+                flexDirection: "column",
+                justifyContent: "center",
+                alignItems: "center",
+                boxSizing: "border-box" as const,
+                cursor: isBooked ? "pointer" : "default",
+                outline: isOpen ? "2px solid #2563eb" : "none",
+                outlineOffset: 1,
+              }}
+            >
+              <div style={{ fontWeight: 600, lineHeight: 1.2 }}>{slot.date.slice(5)}</div>
+              <div style={{ color: "#4b5563", fontSize: "0.65rem", lineHeight: 1.2, marginTop: 2 }}>{shift}</div>
+            </div>
+          );
+        })}
       </div>
+      {openBookedDate && openStatus === "booked" && openSlot && (
+        <div
+          style={{
+            marginTop: "0.75rem",
+            padding: "0.65rem 0.75rem",
+            borderRadius: "8px",
+            background: "rgba(219, 234, 254, 0.65)",
+            border: "1px solid rgba(59, 130, 246, 0.35)",
+            fontSize: "0.8rem",
+            color: "#1e3a8a",
+          }}
+        >
+          <div style={{ fontSize: "0.65rem", fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase" as const, marginBottom: "0.4rem" }}>
+            Booking · {openBookedDate}
+          </div>
+          {openBookings.length > 0 ? (
+            <ul style={{ margin: 0, paddingLeft: "1rem", listStyle: "disc", display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+              {openBookings.map((b) => (
+                <li key={b.action_id} style={{ lineHeight: 1.45 }}>
+                  <div style={{ fontWeight: 600, color: "#1e3a8a" }}>{formatTimeRangeLocal(b.start, b.end)}</div>
+                  <div style={{ fontSize: "0.78rem", color: "#1e40af" }}>Patient: {b.patient_name}</div>
+                  <div style={{ fontSize: "0.75rem", color: "#3b4f77", marginTop: 2 }}>{b.description}</div>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p style={{ margin: 0, lineHeight: 1.45 }}>
+              <span style={{ fontWeight: 600 }}>Shift on calendar: </span>
+              {openShift}
+            </p>
+          )}
+          <p style={{ margin: "0.5rem 0 0", fontSize: "0.7rem", color: "#64748b" }}>
+            Visit times appear when the assigned action includes a schedule window. Otherwise only the day block is marked booked.
+          </p>
+        </div>
+      )}
     </div>
   );
 }
 
-// ── Assignment list (task 5.4) ────────────────────────────────────────────────
+// ── Assignment list ───────────────────────────────────────────────────────────
+
+const DOMAIN_PILL: Record<string, { bg: string; text: string; label: string }> = {
+  health: { bg: "rgba(244, 63, 94, 0.12)", text: "#9f1239", label: "Health" },
+  appointment: { bg: "rgba(56, 189, 248, 0.18)", text: "#0369a1", label: "Appointments" },
+  grocery: { bg: "rgba(52, 211, 153, 0.18)", text: "#047857", label: "Grocery" },
+  financial: { bg: "rgba(251, 191, 36, 0.22)", text: "#92400e", label: "Financial" },
+};
+
+/** Mirrors `agents/shared/db.py` when `domain` is blank (stale rows or legacy data). */
+const MANUAL_TYPE_TO_DOMAIN: Record<string, string> = {
+  cvs_refill: "health",
+  pharmacy_refill: "health",
+  health_refill: "health",
+  appointment_booking: "appointment",
+  book_appointment: "appointment",
+  clinic_booking: "appointment",
+  grocery_delivery: "grocery",
+  instacart_cart: "grocery",
+  grocery_setup: "grocery",
+  supply_reorder: "grocery",
+  amazon_order: "grocery",
+  amazon_reorder: "grocery",
+  caregiver_availability: "appointment",
+  transport: "appointment",
+  financial_assessment: "financial",
+  caregiver_assignment: "appointment",
+};
+
+function inferAssignmentDomain(a: CaregiverAssignment): string {
+  const raw = (a.domain ?? "").toLowerCase().trim();
+  if (raw === "appointments" || raw === "appt" || raw === "appts") return "appointment";
+  if (["health", "appointment", "grocery", "financial"].includes(raw)) return raw;
+  const m = (a.manual_action_type ?? "").toLowerCase().replace(/[\s-]+/g, "_");
+  if (m && MANUAL_TYPE_TO_DOMAIN[m]) return MANUAL_TYPE_TO_DOMAIN[m];
+  const t = (a.type ?? "").toLowerCase();
+  if (t === "scheduling" || t.includes("appointment") || ["clinic_visit", "check_in", "caregiver_scheduling"].includes(t)) {
+    return "appointment";
+  }
+  if (t.includes("grocery") || t.includes("instacart")) return "grocery";
+  if (t.includes("financ")) return "financial";
+  return raw || "health";
+}
+
+const URGENCY_PILL: Record<string, { bg: string; text: string }> = {
+  tier_0: { bg: "#ffe4e6", text: "#9f1239" },
+  tier_1: { bg: "#fef2f2", text: "#991b1b" },
+  tier_2: { bg: "#fffbeb", text: "#92400e" },
+  tier_3: { bg: "#ecfdf5", text: "#065f46" },
+  high: { bg: "#fef2f2", text: "#991b1b" },
+  medium: { bg: "#fffbeb", text: "#92400e" },
+  low: { bg: "#ecfdf5", text: "#065f46" },
+};
+
+function domainPill(domain: string | null | undefined) {
+  const key = (domain ?? "").toLowerCase().trim();
+  const c = DOMAIN_PILL[key] ?? {
+    bg: "rgba(148, 163, 184, 0.2)",
+    text: "#334155",
+    label: key ? key.charAt(0).toUpperCase() + key.slice(1) : "Unknown",
+  };
+  return (
+    <span
+      style={{
+        display: "inline-block",
+        fontSize: "0.65rem",
+        fontWeight: 700,
+        letterSpacing: "0.04em",
+        textTransform: "uppercase" as const,
+        padding: "0.2rem 0.45rem",
+        borderRadius: "4px",
+        background: c.bg,
+        color: c.text,
+      }}
+    >
+      {c.label}
+    </span>
+  );
+}
+
+function urgencyPill(level: string | null | undefined) {
+  if (!level) return null;
+  const c = URGENCY_PILL[level] ?? { bg: "#f3f4f6", text: "#374151" };
+  return (
+    <span style={{ display: "inline-block", fontSize: "0.7rem", fontWeight: 600, padding: "0.2rem 0.5rem", borderRadius: "9999px", background: c.bg, color: c.text }}>
+      {urgencyDisplayLabel(level)}
+    </span>
+  );
+}
+
+function AssignmentCard({ a }: { a: CaregiverAssignment }) {
+  const review = a.review_by ? (formatReviewByLocal(a.review_by) ?? a.review_by) : null;
+  const draft = (a.draft_content ?? "").trim();
+  return (
+    <div
+      style={{
+        border: "1px solid rgba(0,0,0,0.08)",
+        borderRadius: "10px",
+        background: "rgba(255, 255, 255, 0.7)",
+        padding: "0.75rem 0.9rem",
+        boxShadow: "0 1px 2px rgba(15, 23, 42, 0.04)",
+      }}
+    >
+      <div style={{ display: "flex", flexWrap: "wrap", gap: "0.4rem", alignItems: "center", marginBottom: "0.5rem" }}>
+        {domainPill(inferAssignmentDomain(a))}
+        {urgencyPill(a.urgency_level ?? undefined)}
+      </div>
+      <div style={{ fontSize: "0.9rem", fontWeight: 600, color: "#111827", lineHeight: 1.35 }}>{a.description}</div>
+      {review ? (
+        <div style={{ fontSize: "0.75rem", color: "#0f766e", fontWeight: 500, marginTop: "0.4rem" }}>Review by: {review}</div>
+      ) : null}
+      <div style={{ fontSize: "0.8rem", color: "#6b7280", marginTop: "0.35rem" }}>Patient: {a.patient_name}</div>
+      {draft ? (
+        <div style={{ marginTop: "0.6rem" }}>
+          <div style={{ fontSize: "0.62rem", fontWeight: 600, letterSpacing: "0.1em", textTransform: "uppercase" as const, color: "#6b7280", marginBottom: "0.3rem" }}>
+            Action draft
+          </div>
+          <p
+            style={{
+              margin: 0,
+              fontSize: "0.78rem",
+              lineHeight: 1.5,
+              color: "#374151",
+              maxHeight: "7.5em",
+              overflow: "auto",
+              whiteSpace: "pre-wrap",
+              wordBreak: "break-word" as const,
+              padding: "0.5rem 0.55rem",
+              borderRadius: "6px",
+              background: "rgba(249, 250, 251, 0.95)",
+              border: "1px solid #e5e7eb",
+            }}
+          >
+            {draft}
+          </p>
+        </div>
+      ) : null}
+    </div>
+  );
+}
 
 function AssignmentList({ caregiverId }: { caregiverId: string }) {
   const { data: assignments = [], isLoading } = useGetCaregiverAssignmentsQuery(caregiverId);
-  if (isLoading) {
-    return (
-      <div style={{ minHeight: "4rem", display: "flex", alignItems: "center" }}>
-        <p style={{ margin: 0, fontSize: "0.85rem", color: "#6b7280" }}>Loading assignments…</p>
-      </div>
-    );
-  }
+  if (isLoading) return <p style={{ margin: 0, fontSize: "0.85rem", color: "#6b7280" }}>Loading assignments…</p>;
   if (assignments.length === 0) {
     return (
       <div>
@@ -368,17 +531,10 @@ function AssignmentList({ caregiverId }: { caregiverId: string }) {
     );
   }
   return (
-    <ul style={{ listStyle: "none", padding: 0, margin: 0, fontSize: "0.875rem" }}>
-      {assignments.map((a, idx) => (
-        <li
-          key={a.option_id}
-          style={{
-            padding: "0.55rem 0",
-            borderBottom: idx < assignments.length - 1 ? "1px solid rgba(0,0,0,0.06)" : "none",
-            color: "#374151",
-          }}
-        >
-          {a.proposed_date} {a.proposed_time} — {a.caregiver_name}
+    <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: "0.75rem" }}>
+      {assignments.map((a) => (
+        <li key={a.action_id}>
+          <AssignmentCard a={a} />
         </li>
       ))}
     </ul>
@@ -403,32 +559,10 @@ const sectionHeadingStyle: CSSProperties = {
 
 function CaregiverDetailPanel({ caregiver }: { caregiver: Caregiver }) {
   return (
-    <div
-      style={{
-        boxSizing: "border-box",
-        padding: "1.25rem 1.5rem 2rem",
-        overflowY: "auto",
-        height: "100%",
-        background: PAGE_BG,
-      }}
-    >
+    <div style={{ boxSizing: "border-box", padding: "1.25rem 1.5rem 2rem", overflowY: "auto", height: "100%", background: PAGE_BG }}>
       <div style={{ width: "100%" }}>
-        <header
-          style={{
-            marginBottom: "1.25rem",
-            paddingBottom: "1rem",
-            borderBottom: "1px solid rgba(0, 0, 0, 0.08)",
-          }}
-        >
-          <h2
-            style={{
-              margin: "0 0 0.5rem",
-              fontSize: "1.2rem",
-              fontWeight: 700,
-              color: "#111827",
-              letterSpacing: "-0.02em",
-            }}
-          >
+        <header style={{ marginBottom: "1.25rem", paddingBottom: "1rem", borderBottom: "1px solid rgba(0, 0, 0, 0.08)" }}>
+          <h2 style={{ margin: "0 0 0.5rem", fontSize: "1.2rem", fontWeight: 700, color: "#111827", letterSpacing: "-0.02em" }}>
             {caregiver.name}
           </h2>
           <div style={{ display: "flex", flexWrap: "wrap", gap: "0.4rem", alignItems: "center" }}>
@@ -446,23 +580,12 @@ function CaregiverDetailPanel({ caregiver }: { caregiver: Caregiver }) {
               {caregiver.availability_today ? "Available today" : "Not available today"}
             </span>
             {caregiver.booked_today ? (
-              <span
-                style={{
-                  display: "inline-block",
-                  fontSize: "0.75rem",
-                  fontWeight: 500,
-                  padding: "0.2rem 0.55rem",
-                  borderRadius: "9999px",
-                  background: "rgba(59, 130, 246, 0.12)",
-                  color: "#1d4ed8",
-                }}
-              >
+              <span style={{ display: "inline-block", fontSize: "0.75rem", fontWeight: 500, padding: "0.2rem 0.55rem", borderRadius: "9999px", background: "rgba(59, 130, 246, 0.12)", color: "#1d4ed8" }}>
                 Booked
               </span>
             ) : null}
           </div>
         </header>
-
         <div style={{ display: "flex", flexDirection: "column", gap: "1.25rem" }}>
           <section style={detailSectionStyle}>
             <h3 style={sectionHeadingStyle}>14-day schedule</h3>
@@ -478,11 +601,7 @@ function CaregiverDetailPanel({ caregiver }: { caregiver: Caregiver }) {
   );
 }
 
-// ── Main view (task 5.1) — resizable split between scheduling & caregivers ───
-
-const MIN_SCHED_PX = 80;
-const MIN_CARE_PX = 100;
-const SPLITTER_H = 10;
+// ── Add caregiver modal ───────────────────────────────────────────────────────
 
 const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] as const;
 type Day = typeof DAYS[number];
@@ -529,7 +648,6 @@ function AddCaregiverModal({ onClose }: { onClose: () => void }) {
           <h2 style={{ margin: 0, fontSize: "1rem", fontWeight: 600 }}>Add Caregiver</h2>
           <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", fontSize: "1.25rem", color: "#6b7280" }}>×</button>
         </div>
-
         <div style={{ padding: "1.25rem 1.5rem", overflowY: "auto" }}>
           {(["Name", "Email", "Phone"] as const).map((label) => {
             const key = label.toLowerCase() as "name" | "email" | "phone";
@@ -543,7 +661,6 @@ function AddCaregiverModal({ onClose }: { onClose: () => void }) {
               </div>
             );
           })}
-
           <div style={{ marginBottom: "1rem" }}>
             <label style={{ display: "block", fontSize: "0.875rem", fontWeight: 500, marginBottom: "0.25rem" }}>Role</label>
             <select value={role} onChange={(e) => setRole(e.target.value as "caregiver" | "admin")}
@@ -552,7 +669,6 @@ function AddCaregiverModal({ onClose }: { onClose: () => void }) {
               <option value="admin">Admin</option>
             </select>
           </div>
-
           <div>
             <p style={{ fontSize: "0.875rem", fontWeight: 500, marginBottom: "0.5rem" }}>Weekly Schedule</p>
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.875rem" }}>
@@ -590,7 +706,6 @@ function AddCaregiverModal({ onClose }: { onClose: () => void }) {
             </table>
           </div>
         </div>
-
         <div style={{ padding: "1rem 1.5rem", borderTop: "1px solid #e5e7eb", display: "flex", justifyContent: "flex-end", gap: "0.75rem", flexShrink: 0 }}>
           <button onClick={onClose} style={{ padding: "0.5rem 1rem", border: "1px solid #d1d5db", borderRadius: "6px", background: "#fff", cursor: "pointer", fontSize: "0.875rem" }}>Cancel</button>
           <button onClick={handleSubmit} disabled={!canSubmit}
@@ -603,90 +718,32 @@ function AddCaregiverModal({ onClose }: { onClose: () => void }) {
   );
 }
 
+// ── Main view ─────────────────────────────────────────────────────────────────
+
+const MIN_CARE_PX = 100;
+
 export default function CaregiverManagement() {
   const location = useLocation();
-  const highlightActionId: string | undefined = (location.state as any)?.highlightActionId;
+  const navigate = useNavigate();
+  const careHeaderRef = useRef<HTMLDivElement>(null);
+
+  const actionId = new URLSearchParams(location.search).get("action_id");
 
   const { data: caregivers = [], isLoading } = useGetCaregiversQuery();
   const { data: actions = [] } = useGetActionsQuery();
-  const [selectedActionId, setSelectedActionId] = useState<string | null>(highlightActionId ?? null);
   const [selectedCaregiver, setSelectedCaregiver] = useState<Caregiver | null>(null);
   const [showAddCaregiver, setShowAddCaregiver] = useState(false);
 
-  // Auto-select when deep-linked from ActionCard "View Scheduling"
-  useEffect(() => {
-    if (highlightActionId) {
-      setSelectedActionId(highlightActionId);
-      setSelectedCaregiver(null);
-    }
-  }, [highlightActionId]);
-
-  // Derive from live RTK cache so it updates reactively after assign/confirm mutations
-  const selectedAction = selectedActionId
-    ? (actions.find((a) => a.action_id === selectedActionId) ?? null)
+  const assignAction: Action | null = actionId
+    ? (actions.find((a) => a.action_id === actionId) ?? null)
     : null;
 
-  const splitRef = useRef<HTMLDivElement>(null);
-  const schedHeaderRef = useRef<HTMLDivElement>(null);
-  const careHeaderRef = useRef<HTMLDivElement>(null);
-  const [schedContentHeight, setSchedContentHeight] = useState(300);
-  useLayoutEffect(() => {
-    const el = splitRef.current;
-    if (!el) return;
-    const h = el.getBoundingClientRect().height;
-    if (h < 40) return;
-    const shH = schedHeaderRef.current?.offsetHeight ?? 48;
-    const chH = careHeaderRef.current?.offsetHeight ?? 44;
-    const maxSched = h - shH - SPLITTER_H - chH - MIN_CARE_PX;
-    if (maxSched < MIN_SCHED_PX) return;
-    const targetContent = Math.max(MIN_SCHED_PX, Math.min(maxSched, Math.floor(maxSched * 0.58)));
-    setSchedContentHeight(targetContent);
-  }, []);
-
-  const onSplitPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    const container = splitRef.current;
-    if (!container) return;
-    const handleEl = e.currentTarget;
-    handleEl.setPointerCapture(e.pointerId);
-    const startY = e.clientY;
-    const startH = schedContentHeight;
-    const capId = e.pointerId;
-
-    const onMove = (pe: PointerEvent) => {
-      if (pe.pointerId !== capId) return;
-      const shH = schedHeaderRef.current?.offsetHeight ?? 0;
-      const chH = careHeaderRef.current?.offsetHeight ?? 0;
-      const rect = container.getBoundingClientRect();
-      const maxSched = Math.max(MIN_SCHED_PX, rect.height - shH - SPLITTER_H - chH - MIN_CARE_PX);
-      const next = Math.round(startH + (pe.clientY - startY));
-      setSchedContentHeight(Math.max(MIN_SCHED_PX, Math.min(maxSched, next)));
-    };
-
-    const onUp = (pe: PointerEvent) => {
-      if (pe.pointerId !== capId) return;
-      try {
-        handleEl.releasePointerCapture(capId);
-      } catch {
-        /* ignore if already released */
-      }
-      document.removeEventListener("pointermove", onMove);
-      document.removeEventListener("pointerup", onUp);
-      document.removeEventListener("pointercancel", onUp);
-      document.body.style.cursor = "";
-      document.body.style.removeProperty("user-select");
-    };
-
-    document.addEventListener("pointermove", onMove, { passive: false });
-    document.addEventListener("pointerup", onUp);
-    document.addEventListener("pointercancel", onUp);
-    document.body.style.cursor = "row-resize";
-    document.body.style.userSelect = "none";
-  };
+  // Unused but kept to satisfy layout effect dependency shape
+  useLayoutEffect(() => {}, [careHeaderRef]);
 
   return (
     <div style={{ display: "flex", height: "calc(100vh - 56px)" }}>
-      {/* Left: scheduling (fixed top height) + splitter + caregivers (flex) */}
+      {/* Left: caregiver list */}
       <div
         style={{
           width: "340px",
@@ -699,159 +756,74 @@ export default function CaregiverManagement() {
         }}
       >
         <div
-          ref={splitRef}
+          ref={careHeaderRef}
           style={{
-            flex: 1,
-            minHeight: 0,
+            padding: "0.75rem 1rem",
+            borderBottom: "1px solid #d1d5db",
+            fontWeight: 600,
+            fontSize: "0.95rem",
+            background: PAGE_BG,
+            flexShrink: 0,
             display: "flex",
-            flexDirection: "column",
-            overflow: "hidden",
+            alignItems: "center",
+            justifyContent: "space-between",
           }}
         >
-          <div
-            ref={schedHeaderRef}
-            style={{ padding: "1rem", borderBottom: "1px solid #d1d5db", background: PAGE_BG, flexShrink: 0 }}
+          Caregivers
+          <button
+            onClick={() => setShowAddCaregiver(true)}
+            style={{ fontSize: "0.75rem", fontWeight: 500, color: "#2563eb", background: "none", border: "1px solid #2563eb", borderRadius: 4, padding: "2px 8px", cursor: "pointer" }}
           >
-            <span style={{ fontWeight: 600, fontSize: "0.95rem" }}>Pending Tasks</span>
-          </div>
-          <div
-            style={{
-              height: schedContentHeight,
-              minHeight: MIN_SCHED_PX,
-              overflow: "auto",
-              flexShrink: 0,
-              background: PAGE_BG,
-            }}
-          >
-            <SchedulingStrip
-              selectedActionId={selectedActionId}
-              onSelect={(action) => {
-                setSelectedActionId(action.action_id);
-                setSelectedCaregiver(null);
-              }}
-            />
-          </div>
-
-          <div
-            role="separator"
-            aria-orientation="horizontal"
-            aria-label="Drag to resize pending tasks and caregiver sections"
-            onPointerDown={onSplitPointerDown}
-            style={{
-              height: SPLITTER_H,
-              minHeight: SPLITTER_H,
-              flexShrink: 0,
-              cursor: "row-resize",
-              touchAction: "none" as const,
-              background: "rgba(0, 0, 0, 0.04)",
-              borderTop: "1px solid rgba(0, 0, 0, 0.07)",
-              borderBottom: "1px solid rgba(0, 0, 0, 0.07)",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              zIndex: 2,
-            }}
-            title="Drag to resize"
-          >
-            <span
+            + Add
+          </button>
+        </div>
+        {showAddCaregiver && <AddCaregiverModal onClose={() => setShowAddCaregiver(false)} />}
+        <div style={{ flex: 1, minHeight: MIN_CARE_PX, overflow: "auto", background: PAGE_BG }}>
+          {isLoading && <p style={{ padding: "0.75rem", fontSize: "0.85rem", color: "#6b7280" }}>Loading…</p>}
+          {caregivers.map((c) => (
+            <button
+              key={c.caregiver_id}
+              onClick={() => setSelectedCaregiver(c)}
+              type="button"
               style={{
-                width: "40px",
-                height: "4px",
-                borderRadius: "2px",
-                background: "#64748b",
-                boxShadow: "0 1px 0 rgba(255,255,255,0.5)",
-                pointerEvents: "none" as const,
-              }}
-            />
-          </div>
-
-          <div
-            style={{
-              flex: 1,
-              minHeight: MIN_CARE_PX,
-              display: "flex",
-              flexDirection: "column",
-              overflow: "hidden",
-            }}
-          >
-            <div
-              ref={careHeaderRef}
-              style={{
-                padding: "0.75rem 1rem",
+                display: "block",
+                width: "100%",
+                padding: "0.5rem 1rem",
+                textAlign: "left",
+                border: "none",
                 borderBottom: "1px solid #d1d5db",
-                fontWeight: 500,
+                background: selectedCaregiver?.caregiver_id === c.caregiver_id ? ROW_SELECTED : "transparent",
+                cursor: "pointer",
                 fontSize: "0.875rem",
-                background: PAGE_BG,
-                flexShrink: 0,
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
+              }}
+              onMouseEnter={(ev) => {
+                if (selectedCaregiver?.caregiver_id !== c.caregiver_id)
+                  (ev.currentTarget as HTMLButtonElement).style.background = ROW_HOVER;
+              }}
+              onMouseLeave={(ev) => {
+                (ev.currentTarget as HTMLButtonElement).style.background =
+                  selectedCaregiver?.caregiver_id === c.caregiver_id ? ROW_SELECTED : "transparent";
               }}
             >
-              Caregivers
-              <button
-                onClick={() => setShowAddCaregiver(true)}
-                style={{ fontSize: "0.75rem", fontWeight: 500, color: "#2563eb", background: "none", border: "1px solid #2563eb", borderRadius: 4, padding: "2px 8px", cursor: "pointer" }}
-              >
-                + Add
-              </button>
-            </div>
-            {showAddCaregiver && <AddCaregiverModal onClose={() => setShowAddCaregiver(false)} />}
-            <div style={{ flex: 1, minHeight: 0, overflow: "auto", background: PAGE_BG }}>
-              {isLoading && <p style={{ padding: "0.75rem", fontSize: "0.85rem", color: "#6b7280" }}>Loading…</p>}
-              {caregivers.map((c) => (
-                <button
-                  key={c.caregiver_id}
-                  onClick={() => { setSelectedCaregiver(c); setSelectedActionId(null); }}
-                  type="button"
-                  style={{
-                    display: "block",
-                    width: "100%",
-                    padding: "0.5rem 1rem",
-                    textAlign: "left",
-                    border: "none",
-                    borderBottom: "1px solid #d1d5db",
-                    background:
-                      selectedCaregiver?.caregiver_id === c.caregiver_id ? ROW_SELECTED : "transparent",
-                    cursor: "pointer",
-                    fontSize: "0.875rem",
-                  }}
-                  onMouseEnter={(ev) => {
-                    if (selectedCaregiver?.caregiver_id !== c.caregiver_id) {
-                      (ev.currentTarget as HTMLButtonElement).style.background = ROW_HOVER;
-                    }
-                  }}
-                  onMouseLeave={(ev) => {
-                    (ev.currentTarget as HTMLButtonElement).style.background =
-                      selectedCaregiver?.caregiver_id === c.caregiver_id ? ROW_SELECTED : "transparent";
-                  }}
-                >
-                  {c.name}
-                </button>
-              ))}
-            </div>
-          </div>
+              {c.name}
+            </button>
+          ))}
         </div>
       </div>
 
-      {/* Right: scheduling detail or caregiver detail */}
+      {/* Right: assignment panel or caregiver detail */}
       <div style={{ flex: 1, overflow: "hidden", minHeight: 0, background: PAGE_BG }}>
-        {selectedAction ? (
-          <SchedulingDetailPanel action={selectedAction} caregivers={caregivers} />
+        {assignAction ? (
+          <AssignmentPanel
+            action={assignAction}
+            onClose={() => navigate("/caregivers")}
+          />
         ) : selectedCaregiver ? (
           <CaregiverDetailPanel caregiver={selectedCaregiver} />
         ) : (
-          <div
-            style={{
-              boxSizing: "border-box",
-              padding: "2rem 1.5rem",
-              color: "#9ca3af",
-              background: PAGE_BG,
-              height: "100%",
-            }}
-          >
+          <div style={{ boxSizing: "border-box", padding: "2rem 1.5rem", color: "#9ca3af", background: PAGE_BG, height: "100%" }}>
             <div style={{ width: "100%", fontSize: "0.9rem" }}>
-              Select a pending task or caregiver to view details.
+              Select a caregiver to view details, or use "Schedule Task" on an action to assign it.
             </div>
           </div>
         )}

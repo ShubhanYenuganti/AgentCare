@@ -23,7 +23,6 @@ from uagents_core.contrib.protocols.chat import (
 from agents.shared.config import (
     EXECUTOR_SEED,
     LocalFirstResolver,
-    SCHEDULING_AGENT_ADDRESS,
     SUPERVISOR_ADDRESS_BY_DOMAIN,
 )
 from agents.shared.constants import AGENT_PORTS, DOMAIN_KEYWORDS, ORG_CONTEXT_MAP, SUPPORTED_DOMAINS
@@ -57,8 +56,6 @@ from agents.shared.models import (
     OnDemandDetectionRequest,
     QuestionAnswer,
     QuestionRequest,
-    SchedulingOptions,
-    SchedulingQuery,
     SupervisorResult,
 )
 from agents.shared.state_service import (
@@ -158,7 +155,6 @@ class InternalDetectResponse(Model):
 # Keyword sets kept as sync fallback when LLM is unavailable
 _QUESTION_KEYWORDS = {"what", "how", "why", "when", "where", "tell", "explain", "describe", "is there", "does"}
 _MODIFICATION_KEYWORDS = {"change", "update", "modify", "edit", "revise", "adjust", "replace", "rewrite", "alter"}
-_SCHEDULING_KEYWORDS = {"schedule", "availability", "slot", "caregiver", "book", "assign", "calendar"}
 _DETECTION_KEYWORDS = {"check", "analyze", "analyse", "detect", "assess", "review", "scan", "patient create", "patient update"}
 
 _INTENT_SYSTEM_PROMPT = """\
@@ -171,9 +167,6 @@ Classify the user's natural-language query into EXACTLY ONE of these intents:
 
   modification – The user wants to change, revise, or update an existing action
                  draft or patient record.
-
-  scheduling   – The user wants to arrange, book, or check availability for a
-                 caregiver visit or appointment slot.
 
   detection    – The user wants the system to proactively analyse a patient
                  situation and surface relevant care actions. This includes
@@ -189,7 +182,6 @@ Also classify:
                  "missed dose", "grocery order", "bill payment"). Use null only
                  when the query implies a broad full-patient scan or new patient
                  onboarding (patient_create).
-                 For scheduling: always null.
 
   confidence   – "high" if the intent is clear, "low" if ambiguous.
 
@@ -203,7 +195,7 @@ Also classify:
 
 Respond with ONLY a JSON object — no prose, no markdown fences:
 {
-  "intent": "question|modification|scheduling|detection",
+  "intent": "question|modification|detection",
   "domain": "health|appointment|grocery|financial|null",
   "confidence": "high|low",
   "trigger": "patient_create|patient_update|null",
@@ -238,7 +230,7 @@ async def _classify_intent_with_llm(query: str) -> IntentRoutingResult:
         confidence: str = raw.get("confidence", "high")
 
         # Validate intent value
-        valid_intents = {"question", "modification", "scheduling", "detection"}
+        valid_intents = {"question", "modification", "detection"}
         if intent_str not in valid_intents:
             log.warning("LLM returned unknown intent %r; falling back to keywords", intent_str)
             return _classify_intent(query)
@@ -266,18 +258,9 @@ def _classify_intent(query: str) -> IntentRoutingResult:
     Keyword-based fallback classifier. Used when the LLM is unavailable.
     Also exported for use in tests (sync, no I/O).
 
-    Precedence: scheduling > modification > question > detection (default).
+    Precedence: modification > question > detection (default).
     """
     lowered = query.lower()
-
-    if any(kw in lowered for kw in _SCHEDULING_KEYWORDS):
-        return IntentRoutingResult(
-            intent="scheduling",
-            domain=None,
-            confidence="high",
-            trigger=None,
-            updated_fields=None,
-        )
 
     is_detection = any(kw in lowered for kw in _DETECTION_KEYWORDS)
 
@@ -552,7 +535,7 @@ async def _route_query(
     )
 
     # --- Onboarding: no patient context and no action context ---
-    if not resolved_patient_id and not action_id and intent.intent not in ("detection", "question", "modification", "scheduling"):
+    if not resolved_patient_id and not action_id and intent.intent not in ("detection", "question", "modification"):
         onboarding_reply = (
             "Welcome! To add a new patient, please provide:\n"
             "1. Patient name and date of birth\n"
@@ -571,10 +554,6 @@ async def _route_query(
             intent="onboarding",
         )
 
-    # --- Scheduling ---
-    if intent.intent == "scheduling":
-        return await _dispatch_scheduling(ctx, request_id, query, user_sender_address, intent, action_id)
-
     # --- Modification ---
     if intent.intent == "modification":
         return await _dispatch_modification(ctx, request_id, query, user_sender_address, intent, resolved_patient_id, action_id)
@@ -584,63 +563,11 @@ async def _route_query(
         return await _dispatch_question(ctx, request_id, query, user_sender_address, intent, resolved_patient_id, action_id)
 
     # --- General query fallback ---
-    if intent.intent == "general" or (intent.intent not in ("scheduling", "modification", "question", "detection")):
+    if intent.intent == "general" or (intent.intent not in ("modification", "question", "detection")):
         return await _dispatch_general_query(ctx, request_id, query, user_sender_address, intent, resolved_patient_id)
 
     # --- Detection (fan-out) ---
     return await _dispatch_detection(ctx, request_id, query, user_sender_address, intent, patient_id)
-
-
-async def _dispatch_scheduling(
-    ctx: Context,
-    request_id: str,
-    query: str,
-    user_sender_address: str | None,
-    intent: IntentRoutingResult,
-    action_id: str | None = None,
-) -> HttpMessageResponse:
-    routed_address = SCHEDULING_AGENT_ADDRESS
-    request_state.set_request(
-        PendingRequest(
-            request_id=request_id,
-            query=query,
-            domain="scheduling",
-            intent="scheduling",
-            user_sender_address=user_sender_address,
-            routed_address=routed_address,
-            created_at=datetime.now(tz=timezone.utc),
-            action_id=action_id,
-        )
-    )
-    # Resolve patient_id from action record if available
-    resolved_pid = "unknown"
-    if action_id:
-        action_record = await asyncio.to_thread(get_action, action_id)
-        if action_record:
-            resolved_pid = action_record.get("patient_id", "unknown")
-    if resolved_pid == "unknown":
-        resolved_pid = _resolve_patient_id_for_query(query, None) or "unknown"
-
-    scheduling_msg = SchedulingQuery(
-        action_id=action_id or request_id,
-        patient_id=resolved_pid,
-        manual_action_type="caregiver_scheduling",
-        description=query,
-        required_date=None,
-        requester_address=str(ctx.address),
-    )
-    try:
-        await ctx.send(routed_address, scheduling_msg)
-    except Exception as ex:
-        request_state.remove_request(request_id)
-        await _handle_dispatch_error(ctx, user_sender_address, request_id, "scheduling", ex)
-        raise
-    return HttpMessageResponse(
-        request_id=request_id,
-        routed_domain="scheduling",
-        routed_address=routed_address,
-        intent="scheduling",
-    )
 
 
 async def _dispatch_modification(
@@ -1195,13 +1122,6 @@ async def handle_supervisor_detection_result(
         fan_out.pending_domains(),
     )
 
-    for action in result.actions:
-        if action.type == "scheduling_task":
-            update_action(action.action_id, {"scheduling_status": "pending_approval"})
-            ctx.logger.info(
-                "scheduling_status=pending_approval set action_id=%s", action.action_id
-            )
-
     if fan_out.is_complete():
         await _finalize_detection_fan_out(ctx, fan_out)
 
@@ -1355,11 +1275,17 @@ async def heartbeat_and_timeout_sweep(ctx: Context) -> None:
             fo.record_timeout(domain)
         await _finalize_detection_fan_out(ctx, fo)
 
-    pending_count = len(request_state.all_requests())
+    all_pending = request_state.all_requests()
+    pending_count = len(all_pending)
+    now = datetime.now(tz=timezone.utc)
+    oldest_pending_age_seconds = (
+        max((now - r.created_at).total_seconds() for r in all_pending.values())
+        if all_pending else 0.0
+    )
     chat_ingress_age_seconds = (
-        (datetime.now(tz=timezone.utc) - _last_chat_ingress_at).total_seconds()
+        (now - _last_chat_ingress_at).total_seconds()
         if _last_chat_ingress_at
-        else (datetime.now(tz=timezone.utc) - _started_at).total_seconds()
+        else (now - _started_at).total_seconds()
     )
     if pending_count > 0 and chat_ingress_age_seconds >= MAILBOX_INGRESS_SILENCE_WARNING_SECONDS:
         ctx.logger.warning(

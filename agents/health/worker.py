@@ -66,8 +66,8 @@ _DETECTION_USER_TEMPLATE = (
     "  description (string, concise human-readable description)\n"
     "  draft_content (detailed execution-ready caregiver draft)\n"
     '  urgency_level (one of: "tier_1", "tier_2", "tier_3")\n'
-    '  manual_action_type (null or route intent type like "cvs_refill")\n'
-    "  api_payload (null or TEMPLATE-V1 object for API-executable tasks)\n"
+    '  manual_action_type (null or route intent type like "cvs_refill" — see rule below)\n'
+    "  api_payload (null or TEMPLATE-V1 object for API-executable tasks — see rule below)\n"
     "    api_payload must be:\n"
     "    {{\n"
     '      "template_version": "v1",\n'
@@ -82,12 +82,16 @@ _DETECTION_USER_TEMPLATE = (
     "  recipient_email (null or email for notification/execution)\n"
     "  recipient_type (null or one of: caregiver, patient, pharmacy, clinic, prescriber, provider)\n\n"
     "  email_subject (null by default; REQUIRED when recipient_email + recipient_type are set)\n\n"
+    "IMPORTANT — manual_action_type and api_payload are mutually exclusive:\n"
+    "  - If api_payload is set (non-null), manual_action_type MUST be null. The system will execute the API call automatically on approval.\n"
+    "  - If manual_action_type is set (non-null), api_payload MUST be null. This signals a human-executed workflow.\n"
+    "  - Never set both fields on the same action.\n\n"
     "Only use recipient_email values that are present in patient context "
     "(doctor_email, pharmacy_email, or assigned caregiver emails).\n"
     "If no known recipient exists, keep recipient_email/recipient_type/email_subject null.\n\n"
-    "Example format:\n"
+    "Example — automated API action (api_payload set, manual_action_type null):\n"
     '[{{"type": "medication_refill", "description": "...", "draft_content": "...", '
-    '"urgency_level": "tier_2", "manual_action_type": "cvs_refill", '
+    '"urgency_level": "tier_2", "manual_action_type": null, '
     '"api_payload": {{"template_version": "v1", "call": {{"route_key": "POST /mock/cvs/refill", "provider": "mock", '
     '"parameters": {{"medication": {{"value": "Lisinopril 10mg"}}, "patient_id": {{"value": "pt_001"}}, "pharmacy": {{"value": "CVS Mission St"}} }} }} }}, '
     '"recipient_email": "pharmacy@cvs-mission.example", "recipient_type": "pharmacy", "email_subject": "Refill request: Lisinopril for Margaret Chen"}}]\n\n'

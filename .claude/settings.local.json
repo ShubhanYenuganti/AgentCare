@@ -28,7 +28,8 @@
       "Bash(xargs ls *)",
       "Bash(python *)",
       "Bash(grep -E \"\\\\.\\(ts|tsx\\)$\")",
-      "Bash(chmod +x *)"
+      "Bash(chmod +x *)",
+      "Bash(rg *)"
     ]
   }
 }

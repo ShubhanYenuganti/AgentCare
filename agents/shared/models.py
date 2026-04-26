@@ -10,7 +10,7 @@ from uagents import Model
 # Intent routing (Sprint 2)
 # ---------------------------------------------------------------------------
 
-IntentClass = Literal["question", "modification", "scheduling", "detection"]
+IntentClass = Literal["question", "modification", "detection"]
 
 
 class IntentRoutingResult(Model):
@@ -80,6 +80,7 @@ class ActionDraft(Model):
     recipient_email: str | None
     recipient_type: str | None
     email_subject: str | None = None
+    schedule: dict[str, Any] | None = None
 
 
 class WorkerResult(Model):

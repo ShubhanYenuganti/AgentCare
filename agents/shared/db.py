@@ -56,6 +56,10 @@ def init_db(schema_path: str = SCHEMA_PATH) -> None:
     schema = Path(schema_path).read_text(encoding="utf-8")
     with get_connection() as conn:
         conn.executescript(schema)
+        try:
+            conn.execute("ALTER TABLE action_history ADD COLUMN schedule TEXT")
+        except Exception:
+            pass  # column already exists
         conn.commit()
 
 
@@ -723,7 +727,7 @@ def write_action(action: dict[str, Any]) -> str:
                 modification_in_progress, urgency_level, review_by, invocation_date, is_overdue,
                 escalation_count, reviewed, completed, completion_date, assigned_caregiver,
                 caregiver_options_json, outcome, manual_action_type, api_payload,
-                recipient_email, recipient_type, email_subject, scheduling_status, last_modified_at
+                recipient_email, recipient_type, email_subject, schedule, last_modified_at
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
             ON CONFLICT(action_id) DO UPDATE SET
@@ -750,7 +754,7 @@ def write_action(action: dict[str, Any]) -> str:
                 recipient_email=excluded.recipient_email,
                 recipient_type=excluded.recipient_type,
                 email_subject=excluded.email_subject,
-                scheduling_status=excluded.scheduling_status,
+                schedule=excluded.schedule,
                 last_modified_at=strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
             """,
             (
@@ -778,7 +782,7 @@ def write_action(action: dict[str, Any]) -> str:
                 action.get("recipient_email"),
                 action.get("recipient_type"),
                 action.get("email_subject"),
-                action.get("scheduling_status"),
+                json.dumps(action.get("schedule")) if action.get("schedule") is not None else None,
             ),
         )
         conn.commit()
@@ -1060,21 +1064,79 @@ def get_caregiver_schedule(caregiver_id: str, start_date: str, end_date: str) ->
     return _rows_to_dicts(rows)
 
 
+_MANUAL_TYPE_TO_DOMAIN: dict[str, str] = {
+    "cvs_refill": "health",
+    "pharmacy_refill": "health",
+    "health_refill": "health",
+    "appointment_booking": "appointment",
+    "book_appointment": "appointment",
+    "clinic_booking": "appointment",
+    "grocery_delivery": "grocery",
+    "instacart_cart": "grocery",
+    "grocery_setup": "grocery",
+    "supply_reorder": "grocery",
+    "amazon_order": "grocery",
+    "amazon_reorder": "grocery",
+    "caregiver_availability": "appointment",
+    "transport": "appointment",
+    "financial_assessment": "financial",
+    "caregiver_assignment": "appointment",
+}
+
+
+def _normalize_domain_field(raw: Any) -> str | None:
+    if raw is None:
+        return None
+    s = str(raw).strip().lower()
+    if not s:
+        return None
+    if s in ("appointments", "appt", "appts", "scheduling_domain"):
+        return "appointment"
+    if s in ("health", "appointment", "grocery", "financial"):
+        return s
+    return s
+
+
+def _coalesce_action_domain_for_assignment_row(row: dict[str, Any]) -> str:
+    """Ensure a non-empty domain for dashboard assignment cards when DB value is null or legacy."""
+    d = _normalize_domain_field(row.get("domain"))
+    if d in ("health", "appointment", "grocery", "financial"):
+        return d
+    m = str(row.get("manual_action_type") or "").strip().lower().replace(" ", "_").replace("-", "_")
+    if m in _MANUAL_TYPE_TO_DOMAIN:
+        return _MANUAL_TYPE_TO_DOMAIN[m]
+    t = str(row.get("type") or "").strip().lower()
+    if t == "scheduling" or "appointment" in t or t in ("clinic_visit", "check_in", "caregiver_scheduling"):
+        return "appointment"
+    if "grocery" in t or "instacart" in t:
+        return "grocery"
+    if "financ" in t:
+        return "financial"
+    if d:
+        return d
+    return "health"
+
+
 def get_caregiver_assignments(caregiver_id: str) -> list[dict[str, Any]]:
     with get_connection() as conn:
         rows = conn.execute(
             """
-            SELECT p.patient_id, p.name,
-                   (SELECT COUNT(*) FROM action_history a
-                    WHERE a.patient_id=p.patient_id AND a.completed=0) AS pending_actions
-            FROM patient_caregivers pc
-            JOIN patients p ON p.patient_id = pc.patient_id
-            WHERE pc.caregiver_id=? AND p.active=1
-            ORDER BY p.name ASC
+            SELECT ah.action_id, ah.description, ah.type, ah.schedule,
+                   ah.domain, ah.urgency_level, ah.review_by, ah.draft_content,
+                   ah.manual_action_type,
+                   p.name AS patient_name, c.name AS caregiver_name
+            FROM action_history ah
+            JOIN patients p ON p.patient_id = ah.patient_id
+            JOIN caregivers c ON c.caregiver_id = ah.assigned_caregiver
+            WHERE ah.assigned_caregiver = ? AND ah.completed = 0
+            ORDER BY ah.created_at DESC
             """,
             (caregiver_id,),
         ).fetchall()
-    return _rows_to_dicts(rows)
+    out = _rows_to_dicts(rows)
+    for row in out:
+        row["domain"] = _coalesce_action_domain_for_assignment_row(row)
+    return out
 
 
 def get_caregiver_available_slots(date: str, duration_hours: float = 2.0) -> list[dict[str, Any]]:
@@ -1090,6 +1152,43 @@ def get_caregiver_available_slots(date: str, duration_hours: float = 2.0) -> lis
             ORDER BY assigned_count DESC, s.start_time ASC
             """,
             (date,),
+        ).fetchall()
+    return _rows_to_dicts(rows)
+
+
+def get_caregivers_available(start_time: str, end_time: str) -> list[dict[str, Any]]:
+    """Return caregivers with at least one available, unbooked slot overlapping [start_time, end_time]."""
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT c.caregiver_id, c.name, c.email, c.phone, c.role
+            FROM caregivers c
+            JOIN caregiver_schedule s ON s.caregiver_id = c.caregiver_id
+            WHERE s.available = 1 AND s.booked = 0
+              AND s.start_time < :end AND s.end_time > :start
+            ORDER BY c.name ASC
+            """,
+            {"start": start_time, "end": end_time},
+        ).fetchall()
+    return _rows_to_dicts(rows)
+
+
+def get_caregivers_by_workload() -> list[dict[str, Any]]:
+    """Return all caregivers ordered ascending by (assigned_actions + booked_slots)."""
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT c.caregiver_id, c.name, c.email, c.phone, c.role,
+                   (
+                     (SELECT COUNT(*) FROM action_history ah
+                      WHERE ah.assigned_caregiver = c.caregiver_id AND ah.completed = 0)
+                     +
+                     (SELECT COUNT(*) FROM caregiver_schedule cs
+                      WHERE cs.caregiver_id = c.caregiver_id AND cs.booked = 1)
+                   ) AS load
+            FROM caregivers c
+            ORDER BY load ASC, c.name ASC
+            """,
         ).fetchall()
     return _rows_to_dicts(rows)
 

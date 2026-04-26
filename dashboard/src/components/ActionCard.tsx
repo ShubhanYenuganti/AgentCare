@@ -38,10 +38,9 @@ function urgencyStyle(level: string) {
   return URGENCY[level] ?? { accent: "#6b7280", labelBg: "rgba(229, 231, 235, 0.9)", labelText: "#1f2937" };
 }
 
-type CardVariant = "health-modify" | "scheduling" | "qa";
+type CardVariant = "health-modify" | "qa";
 
 function getVariant(action: Action): CardVariant {
-  if (action.manual_action_type) return "scheduling";
   if (action.domain === "health" && action.draft_content) return "health-modify";
   return "qa";
 }
@@ -476,38 +475,34 @@ export default function ActionCard({ action, readOnly = false, highlighted = fal
                 </button>
               )}
 
-              {variant === "scheduling" && (
+              <button
+                onClick={() => approveAction(action.action_id)}
+                disabled={actionPending}
+                data-testid="approve-btn"
+                type="button"
+                style={actionPending ? BTN_ROW_DISABLED : BTN_ROW_APPROVE}
+              >
+                {approving ? "Approving…" : "Approve"}
+              </button>
+              <button
+                onClick={() => dismissAction(action.action_id)}
+                disabled={actionPending}
+                data-testid="dismiss-btn"
+                type="button"
+                style={actionPending ? BTN_ROW_DISABLED : BTN_ROW_DISMISS}
+              >
+                {dismissing ? "Dismissing…" : "Dismiss"}
+              </button>
+
+              {action.completed === 0 && !action.assigned_caregiver && Boolean(action.manual_action_type) && (
                 <button
-                  onClick={() => navigate("/caregivers", { state: { highlightActionId: action.action_id } })}
-                  data-testid="view-scheduling-btn"
+                  onClick={() => navigate(`/caregivers?action_id=${encodeURIComponent(action.action_id)}`)}
+                  data-testid="schedule-task-btn"
                   type="button"
                   style={BTN_ROW_BASE}
                 >
-                  View Scheduling
+                  Schedule Task
                 </button>
-              )}
-
-              {variant !== "scheduling" && (
-                <>
-                  <button
-                    onClick={() => approveAction(action.action_id)}
-                    disabled={actionPending}
-                    data-testid="approve-btn"
-                    type="button"
-                    style={actionPending ? BTN_ROW_DISABLED : BTN_ROW_APPROVE}
-                  >
-                    {approving ? "Approving…" : "Approve"}
-                  </button>
-                  <button
-                    onClick={() => dismissAction(action.action_id)}
-                    disabled={actionPending}
-                    data-testid="dismiss-btn"
-                    type="button"
-                    style={actionPending ? BTN_ROW_DISABLED : BTN_ROW_DISMISS}
-                  >
-                    {dismissing ? "Dismissing…" : "Dismiss"}
-                  </button>
-                </>
               )}
             </div>
           )}

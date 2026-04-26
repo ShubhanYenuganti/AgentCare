@@ -16,7 +16,7 @@ from agents.shared.config import (
     HEALTH_WORKER_ADDRESS,
     LocalFirstResolver,
 )
-from agents.shared.api_capabilities import validate_detection_draft_for_api_requirements
+from agents.shared.api_capabilities import enforce_action_type_exclusivity, validate_detection_draft_for_api_requirements
 from agents.shared.constants import AGENT_PORTS
 import json
 
@@ -338,6 +338,13 @@ async def handle_worker_result(
             ctx.logger.info("[RISK-SCORE] pass_id=%s scored %d drafts", result.pass_id, len(drafts_to_persist))
         except Exception as exc:
             ctx.logger.error("[RISK-SCORE] pass_id=%s failed: %s", result.pass_id, exc)
+
+    drafts_to_persist, exclusivity_fixed = enforce_action_type_exclusivity(drafts_to_persist)
+    if exclusivity_fixed:
+        ctx.logger.warning(
+            "[ENFORCE] pass_id=%s cleared manual_action_type on automated drafts: %s",
+            result.pass_id, exclusivity_fixed,
+        )
 
     for i, draft in enumerate(drafts_to_persist):
         ctx.logger.info(

@@ -16,6 +16,8 @@ from agents.shared.db import (
     get_caregiver_assignments,
     get_caregiver_available_slots,
     get_caregiver_schedule,
+    get_caregivers_available,
+    get_caregivers_by_workload,
 )
 
 
@@ -54,6 +56,19 @@ async def add_caregiver(body: CreateCaregiverBody):
             schedule=schedule_dicts,
         )
         return ok({"caregiver_id": caregiver_id, "name": body.name, "email": body.email, "phone": body.phone, "role": body.role})
+    except Exception as exc:
+        return JSONResponse(status_code=500, content=err(str(exc)))
+
+
+@router.get("/available")
+async def available_caregivers(
+    start_time: str | None = Query(default=None, description="ISO datetime start of window"),
+    end_time: str | None = Query(default=None, description="ISO datetime end of window"),
+):
+    try:
+        if start_time and end_time:
+            return ok(get_caregivers_available(start_time, end_time))
+        return ok(get_caregivers_by_workload())
     except Exception as exc:
         return JSONResponse(status_code=500, content=err(str(exc)))
 

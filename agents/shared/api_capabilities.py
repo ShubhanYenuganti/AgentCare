@@ -226,6 +226,22 @@ def build_post_request_body(route: str, params: dict[str, Any]) -> dict[str, Any
     return body
 
 
+def enforce_action_type_exclusivity(drafts: list[Any]) -> tuple[list[Any], list[str]]:
+    """Enforce mutual exclusivity of api_payload and manual_action_type.
+
+    If a draft has both set, api_payload takes precedence and manual_action_type is cleared.
+    Returns (cleaned_drafts, list_of_corrected_action_ids).
+    """
+    cleaned: list[Any] = []
+    corrected: list[str] = []
+    for draft in drafts:
+        if draft.api_payload and draft.manual_action_type:
+            draft = draft.copy(update={"manual_action_type": None})
+            corrected.append(draft.action_id)
+        cleaned.append(draft)
+    return cleaned, corrected
+
+
 def validate_detection_draft_for_api_requirements(
     draft: dict[str, Any],
     known_recipient_emails: set[str] | None = None,

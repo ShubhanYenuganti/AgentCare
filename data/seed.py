@@ -291,41 +291,41 @@ PATIENT_CAREGIVER_ASSIGNMENTS = [
 ]
 
 SEEDED_ACTIONS = [
-    # ── Health: Metformin missed 4 days (tier_0, overdue) ──────────────────────
+    # ── Health: Metformin missed 4 days (tier_0, urgent) ──────────────────────
     {
         "action_id": "act_seed_001",
         "patient_id": "pt_003",
         "domain": "health",
         "type": "manual_approval",
-        "description": "Metformin missed 4 days — condition worsening escalation",
+        "description": "Metformin missed 4 days — condition worsening, caregiver escalation pending",
         "draft_content": (
             "Dear Dr. Reyes, Dorothy Kim (68) missed her Metformin 500mg for 4 consecutive "
             "days. Caregiver notes from Apr 22 report increased fatigue and dizziness. "
             "Requesting immediate review and guidance on next steps."
         ),
         "urgency_level": "tier_0",
-        "is_overdue": 1,
-        "review_by": "2026-04-23T09:00:00Z",
+        "is_overdue": 0,
+        "review_by": "2026-04-28T09:00:00Z",
         "invocation_date": "2026-04-23T07:00:00Z",
         "escalation_count": 1,
         "scheduling_status": None,
         "manual_action_type": None,
     },
-    # ── Appointment: Margaret Chen overdue cardiology visit (tier_1) ───────────
+    # ── Appointment: Margaret Chen cardiology visit due (tier_1) ──────────────
     {
         "action_id": "act_seed_002",
         "patient_id": "pt_001",
         "domain": "appointment",
         "type": "manual_approval",
-        "description": "Cardiology follow-up overdue — last visit Aug 2025, now 8 months overdue",
+        "description": "Cardiology follow-up due — last visit Aug 2025, 8 months since last check",
         "draft_content": (
             "Dear Dr. Patel, Margaret Chen (74) is due for her 6-month cardiology follow-up. "
-            "Her last visit was August 10, 2025 — she is now 8 months overdue. "
+            "Her last visit was August 10, 2025 — it has now been 8 months. "
             "Please advise on availability for an appointment in late April or May 2026."
         ),
         "urgency_level": "tier_1",
-        "is_overdue": 1,
-        "review_by": "2026-04-26T17:00:00Z",
+        "is_overdue": 0,
+        "review_by": "2026-04-30T17:00:00Z",
         "invocation_date": "2026-04-24T08:00:00Z",
         "escalation_count": 0,
         "scheduling_status": None,
@@ -351,6 +351,7 @@ SEEDED_ACTIONS = [
         "scheduling_status": "pending_approval",
         "manual_action_type": "transport",
         "caregiver_options_json": '[{"caregiver_id":"cg_004","name":"Marcus Webb","available":true},{"caregiver_id":"cg_006","name":"Tom Callahan","available":true},{"caregiver_id":"cg_008","name":"Kevin Huang","available":true}]',
+        "schedule": {"date": "2026-04-28", "start_time": "10:00", "end_time": "12:00"},
     },
     # ── Financial: PG&E anomaly for Robert Harris (tier_1) ────────────────────
     {
@@ -372,22 +373,22 @@ SEEDED_ACTIONS = [
         "scheduling_status": None,
         "manual_action_type": None,
     },
-    # ── Grocery: Margaret Chen staples overdue (tier_2) ───────────────────────
+    # ── Grocery: Margaret Chen staples reorder needed (tier_2) ───────────────
     {
         "action_id": "act_seed_005",
         "patient_id": "pt_001",
         "domain": "grocery",
         "type": "manual_approval",
-        "description": "Weekly grocery staples overdue — last delivery Apr 12, 12 days ago",
+        "description": "Weekly grocery staples — last delivery Apr 12, reorder needed this week",
         "draft_content": (
-            "Margaret Chen's weekly grocery staples are overdue. Last delivery was Apr 12 "
+            "Margaret Chen's weekly grocery staples are due for reorder. Last delivery was Apr 12 "
             "(12 days ago). Items needed: spinach, chicken breast, greek yogurt (all 7-day "
-            "frequency). Brown rice (14-day) is also overdue. Please approve reorder for "
+            "frequency). Brown rice (14-day) is also due. Please approve reorder for "
             "delivery this week."
         ),
         "urgency_level": "tier_2",
-        "is_overdue": 1,
-        "review_by": "2026-04-27T12:00:00Z",
+        "is_overdue": 0,
+        "review_by": "2026-04-29T12:00:00Z",
         "invocation_date": "2026-04-24T10:00:00Z",
         "escalation_count": 0,
         "scheduling_status": None,
@@ -620,15 +621,16 @@ def _seed_assignments(conn: sqlite3.Connection) -> None:
 
 def _seed_actions(conn: sqlite3.Connection) -> None:
     for action in SEEDED_ACTIONS:
+        raw_schedule = action.get("schedule")
         conn.execute(
             """
             INSERT INTO action_history (
                 action_id, patient_id, domain, type, description, draft_content, urgency_level,
                 review_by, invocation_date, is_overdue, escalation_count, scheduling_status,
                 manual_action_type, reviewed, completed, completion_date, assigned_caregiver,
-                caregiver_options_json, outcome, draft_version, modification_in_progress
+                caregiver_options_json, outcome, draft_version, modification_in_progress, schedule
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, NULL, ?, ?, NULL, 1, 0)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, NULL, ?, ?, NULL, 1, 0, ?)
             """,
             (
                 action["action_id"],
@@ -646,6 +648,7 @@ def _seed_actions(conn: sqlite3.Connection) -> None:
                 action.get("manual_action_type"),
                 action.get("assigned_caregiver"),
                 action.get("caregiver_options_json"),
+                json.dumps(raw_schedule) if raw_schedule is not None else None,
             ),
         )
 

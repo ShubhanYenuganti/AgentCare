@@ -75,6 +75,11 @@ Return a JSON array. Each element must be an object with exactly these keys:
   "email_subject": null | "<subject required when recipient_email+recipient_type are set>"
 }
 
+IMPORTANT — manual_action_type and api_payload are mutually exclusive:
+  - If api_payload is set (non-null), manual_action_type MUST be null. The system executes the API call automatically on approval.
+  - If manual_action_type is set (non-null), api_payload MUST be null. This signals a human-executed workflow.
+  - Never set both fields on the same action.
+
 For API-executable actions, always emit template_version v1 payload and fill each
 parameters.<field>.value node. Do not emit raw request-body JSON.
 Only use recipient_email values present in patient context

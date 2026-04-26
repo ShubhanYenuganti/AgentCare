@@ -2,6 +2,7 @@ import { createApi, fetchBaseQuery } from "@reduxjs/toolkit/query/react";
 import type {
   Action,
   Caregiver,
+  CaregiverAssignment,
   CaregiverScheduleSlot,
   ChatMessage,
   CreateCaregiverBody,
@@ -127,34 +128,29 @@ export const api = createApi({
       transformResponse: (raw: { success: boolean; data: CaregiverScheduleSlot[] }) => extractData(raw),
       providesTags: (_result, _error, id) => [{ type: "Schedule", id }],
     }),
-    getCaregiverAssignments: builder.query<SchedulingOption[], string>({
+    getCaregiverAssignments: builder.query<CaregiverAssignment[], string>({
       query: (id) => `/caregivers/${id}/assignments`,
-      transformResponse: (raw: { success: boolean; data: SchedulingOption[] }) => extractData(raw),
+      transformResponse: (raw: { success: boolean; data: CaregiverAssignment[] }) => extractData(raw),
       providesTags: (_result, _error, id) => [{ type: "Assignments", id }],
     }),
 
-    // ── Scheduling ────────────────────────────────────────────────────────────
-    assignScheduling: builder.mutation<Action, { actionId: string; caregiver_id: string }>({
-      query: ({ actionId, caregiver_id }) => ({
-        url: `/scheduling/${actionId}/assign`,
-        method: "POST",
-        body: { caregiver_id },
+    // ── Caregiver assignment ──────────────────────────────────────────────────
+    getCaregiversAvailable: builder.query<Caregiver[], { start_time?: string; end_time?: string } | void>({
+      query: (args) => {
+        if (args?.start_time && args?.end_time) {
+          return `/caregivers/available?start_time=${encodeURIComponent(args.start_time)}&end_time=${encodeURIComponent(args.end_time)}`;
+        }
+        return "/caregivers/available";
+      },
+      transformResponse: (raw: { success: boolean; data: Caregiver[] }) => extractData(raw),
+      providesTags: ["Caregiver"],
+    }),
+    assignCaregiverToAction: builder.mutation<Action, { actionId: string; assigned_caregiver: string }>({
+      query: ({ actionId, assigned_caregiver }) => ({
+        url: `/actions/${actionId}`,
+        method: "PATCH",
+        body: { assigned_caregiver },
       }),
-      transformResponse: (raw: { success: boolean; data: Action }) => extractData(raw),
-      invalidatesTags: ["Action", "Caregiver"],
-    }),
-    confirmScheduling: builder.mutation<Action, string>({
-      query: (actionId) => ({ url: `/scheduling/${actionId}/confirm`, method: "POST" }),
-      transformResponse: (raw: { success: boolean; data: Action }) => extractData(raw),
-      invalidatesTags: ["Action", "Caregiver"],
-    }),
-    declineScheduling: builder.mutation<Action, string>({
-      query: (actionId) => ({ url: `/scheduling/${actionId}/decline`, method: "POST" }),
-      transformResponse: (raw: { success: boolean; data: Action }) => extractData(raw),
-      invalidatesTags: ["Action", "Caregiver"],
-    }),
-    cancelScheduling: builder.mutation<Action, string>({
-      query: (actionId) => ({ url: `/scheduling/${actionId}/cancel`, method: "POST" }),
       transformResponse: (raw: { success: boolean; data: Action }) => extractData(raw),
       invalidatesTags: ["Action", "Caregiver"],
     }),
@@ -200,10 +196,8 @@ export const {
   useGetCaregiversQuery,
   useGetCaregiverScheduleQuery,
   useGetCaregiverAssignmentsQuery,
-  useAssignSchedulingMutation,
-  useConfirmSchedulingMutation,
-  useDeclineSchedulingMutation,
-  useCancelSchedulingMutation,
+  useGetCaregiversAvailableQuery,
+  useAssignCaregiverToActionMutation,
   useGetOrgQuery,
   useUpdateOrgMutation,
 } = api;

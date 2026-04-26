@@ -1,3 +1,6 @@
+# DEPRECATED: Scheduling agent is no longer used. Time-oriented tasks are handled
+# by domain agents that set a `schedule` field directly on the action. Caregiver
+# assignment is done via the UI at /caregivers?action_id=<id>.
 """Scheduling agent scaffold."""
 
 from __future__ import annotations

@@ -43,7 +43,7 @@ export function coalesceRecordToAction(
     modification_in_progress: raw.modification_in_progress as number | undefined,
     idempotency_key: raw.idempotency_key as string | null | undefined,
     manual_action_type: (raw.manual_action_type as string | null) ?? null,
-    scheduling_status: (raw.scheduling_status as string | null) ?? null,
+    schedule: (raw.schedule as Action["schedule"]) ?? null,
     assigned_caregiver: (raw.assigned_caregiver as string | null) ?? null,
     created_at: raw.created_at as string | undefined,
     recipient_email: (raw.recipient_email as string | null) ?? null,

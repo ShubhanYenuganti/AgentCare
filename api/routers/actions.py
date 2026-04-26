@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from html import escape
+import json
 import logging
 import os
 from typing import Any
@@ -62,6 +63,7 @@ class ActionModificationBody(BaseModel):
     reviewed: bool | None = None
     completed: bool | None = None
     urgency_level: str | None = None
+    assigned_caregiver: str | None = None
 
 
 def _enrich_actions(actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -81,7 +83,14 @@ def _enrich_actions(actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for a in actions:
         a.setdefault("patient_name", name_map.get(a.get("patient_id")))
         a.setdefault("is_overdue", a.get("is_overdue", 0))
-        a.setdefault("scheduling_status", a.get("scheduling_status"))
+        raw_schedule = a.get("schedule")
+        if raw_schedule and isinstance(raw_schedule, str):
+            try:
+                a["schedule"] = json.loads(raw_schedule)
+            except Exception:
+                a["schedule"] = None
+        else:
+            a.setdefault("schedule", None)
         a["execution_plan"] = build_execution_plan_preview(a)
     return actions
 
@@ -152,6 +161,8 @@ async def patch_action(action_id: str, body: ActionModificationBody):
             updates["completed"] = int(body.completed)
         if body.urgency_level is not None:
             updates["urgency_level"] = body.urgency_level
+        if body.assigned_caregiver is not None:
+            updates["assigned_caregiver"] = body.assigned_caregiver
         if body.modification_instruction is not None:
             updates["modification_in_progress"] = 1
             if body.idempotency_key:
@@ -162,6 +173,26 @@ async def patch_action(action_id: str, body: ActionModificationBody):
 
         if updates:
             update_action(action_id, updates)
+
+        # Book the matching caregiver_schedule slot when assigning with a schedule
+        if body.assigned_caregiver and action.get("schedule"):
+            schedule = action["schedule"]
+            if isinstance(schedule, str):
+                try:
+                    schedule = json.loads(schedule)
+                except Exception:
+                    schedule = None
+            if schedule and schedule.get("start_time") and schedule.get("end_time"):
+                with get_connection() as conn:
+                    conn.execute(
+                        """
+                        UPDATE caregiver_schedule SET booked=1
+                        WHERE caregiver_id=? AND available=1 AND booked=0
+                          AND start_time < ? AND end_time > ?
+                        """,
+                        (body.assigned_caregiver, schedule["end_time"], schedule["start_time"]),
+                    )
+                    conn.commit()
 
         if body.modification_instruction is not None and EXECUTOR_INTERNAL_URL:
             context_prefix = (

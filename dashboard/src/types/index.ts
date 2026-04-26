@@ -90,7 +90,7 @@ export interface Action {
   modification_in_progress?: number;
   idempotency_key?: string | null;
   manual_action_type?: string | null;
-  scheduling_status?: string | null;
+  schedule?: { start_time: string; end_time: string; recurrence?: { day: string; freq: string } } | null;
   assigned_caregiver?: string | null;
   created_at?: string;
   recipient_email?: string | null;
@@ -126,10 +126,16 @@ export interface Caregiver {
 
 export interface CaregiverScheduleSlot {
   date: string;
-  shift: string;
+  /** Present when the API enriches the row; otherwise derive from `booked` / `available`. */
+  shift?: string;
+  status?: "available" | "booked" | "unavailable";
+  /** SQLite 0/1 from `caregiver_schedule` */
+  available?: number;
+  booked?: number;
+  start_time?: string | null;
+  end_time?: string | null;
   patient_id?: string | null;
   patient_name?: string | null;
-  status: "available" | "booked" | "unavailable";
 }
 
 export interface OrgProfile {
@@ -155,6 +161,20 @@ export interface SchedulingOption {
   proposed_date: string;
   proposed_time: string;
   notes?: string;
+}
+
+export interface CaregiverAssignment {
+  action_id: string;
+  description: string;
+  type: string;
+  schedule: string | null;
+  domain?: string | null;
+  manual_action_type?: string | null;
+  urgency_level?: string | null;
+  review_by?: string | null;
+  draft_content?: string | null;
+  patient_name: string;
+  caregiver_name: string;
 }
 
 export interface SetupStatus {

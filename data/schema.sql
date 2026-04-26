@@ -187,6 +187,7 @@ CREATE TABLE IF NOT EXISTS action_history (
   recipient_email          TEXT,
   recipient_type           TEXT,
   email_subject            TEXT,
+  schedule                 TEXT,
   last_modified_at         TEXT,
   created_at               TEXT DEFAULT (datetime('now'))
 );
